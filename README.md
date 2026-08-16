@@ -18,6 +18,10 @@ This is the same list Discord shows when you type `!help`:
 - `!temp` — Reads the current indoor temperature sensor.
 - `!sysinfo` — Displays system diagnostics (uptime, heap, RSSI, etc.).
 - `!time` — Displays the current bot time.
+- `!news` — Space and high-tech science headlines.
+- `!physics` — Latest arXiv physics papers.
+- `!apod` — NASA Astronomy Picture of the Day.
+- `!iss` — Current International Space Station position.
 - `!help` — Shows this command list.
 
 **Owner-Only Commands:**
@@ -51,6 +55,7 @@ const char* WIFI_SSID     = "ssid";
 const char* WIFI_PASSWORD = "password";
 const char* BOT_TOKEN     = "bot token";
 const char* WEATHER_API_KEY = "WEATHER_API_KEY";
+const char* NASA_API_KEY    = "DEMO_KEY";
 
 const String OWNER_ID_STR        = "OWNER_ID_STR";
 const char*  TEMP_CHANNEL_ID_STR = "TEMP_CHANNEL_ID_ST";  // reserved / main channel
@@ -62,6 +67,7 @@ const String TARGET_CHANNEL_ID = "TARGET_CHANNEL_ID";
 | `WIFI_SSID` / `WIFI_PASSWORD` | ESP32 station Wi‑Fi |
 | `BOT_TOKEN` | Discord Gateway + REST messages |
 | `WEATHER_API_KEY` | OpenWeatherMap `!weather` |
+| `NASA_API_KEY` | NASA APOD for `!apod` (optional; `DEMO_KEY` works with strict limits) |
 | `OWNER_ID_STR` | Who can run hardware commands |
 | `TARGET_CHANNEL_ID` | Auto sysinfo and scheduled summaries |
 | `TEMP_CHANNEL_ID_STR` | Placeholder for a “main” channel ID (not used by commands yet) |
@@ -130,6 +136,25 @@ The bot must be able to **see and send** in that channel (channel permissions + 
 4. Paste it into `WEATHER_API_KEY` with **no extra spaces**.
 5. New keys can take up to a few hours to activate.
 6. `!weather` uses Current Weather Data with `zip={zip},US` and `units=imperial`.
+
+---
+
+## Science / physics commands (no extra keys except APOD)
+
+These are public, like `!weather`. They fetch a short digest so the ESP32 stays within memory limits.
+
+| Command | Source | Key? |
+|---|---|---|
+| `!news` | [Spaceflight News API](https://api.spaceflightnewsapi.net/) — 3 space / high-tech headlines | No |
+| `!physics` | [arXiv](https://arxiv.org/) `cat:physics` — 3 newest papers | No |
+| `!apod` | [NASA APOD](https://api.nasa.gov/) — title, short explanation, image URL | Optional |
+| `!iss` | [Open Notify](http://open-notify.org/) — ISS latitude / longitude | No |
+
+### How to get a NASA key (`NASA_API_KEY`)
+
+1. Open [api.nasa.gov](https://api.nasa.gov/) and generate a free key (email signup).
+2. Paste it into `NASA_API_KEY`.
+3. Until then, `DEMO_KEY` works for light testing but is shared and rate-limited. Use your own key if `!apod` starts failing.
 
 ---
 

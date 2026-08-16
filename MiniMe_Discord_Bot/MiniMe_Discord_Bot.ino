@@ -5,6 +5,10 @@
 • !temp — Reads the current indoor temperature sensor.
 • !sysinfo — Displays system diagnostics (uptime, heap, RSSI, etc.).
 • !time — Displays the current bot time.
+• !news — Space and high-tech science headlines.
+• !physics — Latest arXiv physics papers.
+• !apod — NASA Astronomy Picture of the Day.
+• !iss — Current International Space Station position.
 • !help — Shows this command list.
  Owner-Only Commands:
 • !status — Checks WiFi and Discord Gateway connection status.
@@ -26,15 +30,19 @@
 #include <driver/ledc.h>
 #include <WiFiUdp.h>
 #include <NTPClient.h>
+
 // ====== USER CONFIG ======
-const char* WIFI_SSID     = "ssid";
-const char* WIFI_PASSWORD = "password";
-const char* BOT_TOKEN     = "bot token";
-const char* WEATHER_API_KEY = " WEATHER_API_KEY";
+const char* WIFI_SSID     = "";
+const char* WIFI_PASSWORD = "";
+const char* BOT_TOKEN     = "";
+const char* WEATHER_API_KEY = "";
+const char* NASA_API_KEY    = "";
+
 // ====== OWNER AND CHANNEL IDS ======
-const String OWNER_ID_STR        = "OWNER_ID_STR ";
-const char*  TEMP_CHANNEL_ID_STR = "TEMP_CHANNEL_ID_ST";  // main channel
-const String TARGET_CHANNEL_ID = "TARGET_CHANNEL_ID";
+const String OWNER_ID_STR        = "";
+const char*  TEMP_CHANNEL_ID_STR = "";  
+const String TARGET_CHANNEL_ID = "";
+
 // ====== GPIO CONFIG ======
 const int RGB_LED_PIN = 48;
 const int PIN_SERVO   = 47;
@@ -248,6 +256,213 @@ bool getWeather(const String& zip, String& outReport) {
               "";
   return true;
 }
+bool skipHttpHeaders(Client& client, unsigned long timeoutMs) {
+  unsigned long timeout = millis();
+  while (client.available() == 0) {
+    if (millis() - timeout > timeoutMs) {
+      return false;
+    }
+  }
+  while (client.connected() || client.available()) {
+    String line = client.readStringUntil('\n');
+    if (line == "\r" || line.length() == 0) return true;
+    if (millis() - timeout > timeoutMs) return false;
+  }
+  return true;
+}
+String collapseWhitespace(String s) {
+  s.replace("\n", " ");
+  s.replace("\r", " ");
+  s.replace("\t", " ");
+  while (s.indexOf("  ") >= 0) {
+    s.replace("  ", " ");
+  }
+  s.trim();
+  return s;
+}
+String truncateText(const String& s, int maxLen) {
+  if (s.length() <= maxLen) return s;
+  return s.substring(0, maxLen - 3) + "...";
+}
+bool getScienceNews(String& outReport) {
+  httpsClient.stop();
+  httpsClient.setInsecure();
+  if (!httpsClient.connect("api.spaceflightnewsapi.net", 443)) {
+    outReport = "Science news connection failed.";
+    return false;
+  }
+  httpsClient.print(
+    "GET /v4/articles/?limit=3 HTTP/1.1\r\n"
+    "Host: api.spaceflightnewsapi.net\r\n"
+    "User-Agent: MiniMeBot/1.0\r\n"
+    "Connection: close\r\n\r\n");
+  if (!skipHttpHeaders(httpsClient, 8000)) {
+    outReport = "Science news timeout.";
+    httpsClient.stop();
+    return false;
+  }
+  StaticJsonDocument<192> filter;
+  filter["results"][0]["title"] = true;
+  filter["results"][0]["news_site"] = true;
+  filter["results"][0]["url"] = true;
+  StaticJsonDocument<2048> doc;
+  DeserializationError err = deserializeJson(doc, httpsClient, DeserializationOption::Filter(filter));
+  httpsClient.stop();
+  if (err) {
+    outReport = "Science news JSON parse error.";
+    return false;
+  }
+  JsonArray results = doc["results"].as<JsonArray>();
+  if (results.isNull() || results.size() == 0) {
+    outReport = "No science headlines right now.";
+    return false;
+  }
+  outReport = "🛰️ **Space & high-tech headlines:**\n";
+  int n = 0;
+  for (JsonObject item : results) {
+    if (n >= 3) break;
+    String title = collapseWhitespace(item["title"] | "Untitled");
+    String site = item["news_site"] | "Source";
+    String url = item["url"] | "";
+    outReport += String(n + 1) + ". **" + truncateText(title, 140) + "** (" + site + ")";
+    if (url.length()) outReport += "\n" + url;
+    outReport += "\n";
+    n++;
+  }
+  return n > 0;
+}
+bool getPhysicsPapers(String& outReport) {
+  WiFiClient client;
+  if (!client.connect("export.arxiv.org", 80)) {
+    outReport = "arXiv connection failed.";
+    return false;
+  }
+  client.print(
+    "GET /api/query?search_query=cat:physics&start=0&max_results=3&sortBy=submittedDate&sortOrder=descending HTTP/1.1\r\n"
+    "Host: export.arxiv.org\r\n"
+    "User-Agent: MiniMeBot/1.0 (ESP32 Discord bot)\r\n"
+    "Connection: close\r\n\r\n");
+  if (!skipHttpHeaders(client, 8000)) {
+    outReport = "arXiv timeout.";
+    client.stop();
+    return false;
+  }
+  String xml;
+  unsigned long start = millis();
+  while (millis() - start < 8000) {
+    while (client.available()) {
+      xml += client.readString();
+      if (xml.length() > 24000) break;
+    }
+    if (!client.connected() && !client.available()) break;
+    delay(10);
+  }
+  client.stop();
+  if (xml.length() < 50) {
+    outReport = "arXiv response empty.";
+    return false;
+  }
+  outReport = "⚛️ **Latest arXiv physics papers:**\n";
+  int from = 0;
+  int n = 0;
+  while (n < 3) {
+    int entry = xml.indexOf("<entry>", from);
+    if (entry < 0) break;
+    int entryEnd = xml.indexOf("</entry>", entry);
+    if (entryEnd < 0) break;
+    String block = xml.substring(entry, entryEnd);
+    int t0 = block.indexOf("<title>");
+    int t1 = block.indexOf("</title>");
+    String title = "Untitled";
+    if (t0 >= 0 && t1 > t0) {
+      title = collapseWhitespace(block.substring(t0 + 7, t1));
+    }
+    int i0 = block.indexOf("<id>");
+    int i1 = block.indexOf("</id>");
+    String id = "";
+    if (i0 >= 0 && i1 > i0) {
+      id = collapseWhitespace(block.substring(i0 + 4, i1));
+    }
+    outReport += String(n + 1) + ". **" + truncateText(title, 140) + "**";
+    if (id.length()) outReport += "\n" + id;
+    outReport += "\n";
+    n++;
+    from = entryEnd + 8;
+  }
+  if (n == 0) {
+    outReport = "No physics papers found.";
+    return false;
+  }
+  return true;
+}
+bool getApod(String& outReport) {
+  httpsClient.stop();
+  httpsClient.setInsecure();
+  if (!httpsClient.connect("api.nasa.gov", 443)) {
+    outReport = "NASA APOD connection failed.";
+    return false;
+  }
+  String path = String("/planetary/apod?api_key=") + NASA_API_KEY;
+  httpsClient.print(String("GET ") + path + " HTTP/1.1\r\n" +
+                    "Host: api.nasa.gov\r\n" +
+                    "User-Agent: MiniMeBot/1.0\r\n" +
+                    "Connection: close\r\n\r\n");
+  if (!skipHttpHeaders(httpsClient, 8000)) {
+    outReport = "NASA APOD timeout.";
+    httpsClient.stop();
+    return false;
+  }
+  StaticJsonDocument<128> filter;
+  filter["title"] = true;
+  filter["explanation"] = true;
+  filter["date"] = true;
+  filter["url"] = true;
+  StaticJsonDocument<4096> doc;
+  DeserializationError err = deserializeJson(doc, httpsClient, DeserializationOption::Filter(filter));
+  httpsClient.stop();
+  if (err) {
+    outReport = "NASA APOD JSON parse error.";
+    return false;
+  }
+  String title = doc["title"] | "Astronomy Picture of the Day";
+  String date = doc["date"] | "";
+  String expl = collapseWhitespace(doc["explanation"] | "");
+  String url = doc["url"] | "";
+  outReport = "🌌 **NASA APOD";
+  if (date.length()) outReport += " (" + date + ")";
+  outReport += ":**\n• **" + title + "**\n" + truncateText(expl, 350);
+  if (url.length()) outReport += "\n" + url;
+  return true;
+}
+bool getIssPosition(String& outReport) {
+  WiFiClient client;
+  if (!client.connect("api.open-notify.org", 80)) {
+    outReport = "ISS tracker connection failed.";
+    return false;
+  }
+  client.print(
+    "GET /iss-now.json HTTP/1.1\r\n"
+    "Host: api.open-notify.org\r\n"
+    "Connection: close\r\n\r\n");
+  if (!skipHttpHeaders(client, 5000)) {
+    outReport = "ISS tracker timeout.";
+    client.stop();
+    return false;
+  }
+  StaticJsonDocument<512> doc;
+  DeserializationError err = deserializeJson(doc, client);
+  client.stop();
+  if (err) {
+    outReport = "ISS tracker JSON parse error.";
+    return false;
+  }
+  String lat = doc["iss_position"]["latitude"] | "?";
+  String lon = doc["iss_position"]["longitude"] | "?";
+  outReport = "🌍 **ISS now:**\n"
+              "• **Latitude:** " + lat + "\n"
+              "• **Longitude:** " + lon;
+  return true;
+}
 void handleCommand(const String& content, const String& authorId,
                    const String& channelId, bool isDM)
 {
@@ -261,6 +476,10 @@ if (cmd.startsWith("!help")) {
       "• `!temp` — Reads the current indoor temperature sensor.\n"
       "• `!sysinfo` — Displays system diagnostics (uptime, heap, RSSI, etc.).\n"
       "• `!time` — Displays the current bot time.\n"
+      "• `!news` — Space and high-tech science headlines.\n"
+      "• `!physics` — Latest arXiv physics papers.\n"
+      "• `!apod` — NASA Astronomy Picture of the Day.\n"
+      "• `!iss` — Current International Space Station position.\n"
       "• `!help` — Shows this command list.\n\n"
       "**👑 Owner-Only Commands:**\n"
       "• `!status` — Checks WiFi and Discord Gateway connection status.\n"
@@ -292,6 +511,50 @@ if (cmd.startsWith("!help")) {
     } else {
       sendDiscordMessage(channelId, report);
       drawStatus("Weather", "Error");
+    }
+    return;
+  }
+  if (cmd.startsWith("!news")) {
+    String report;
+    if (getScienceNews(report)) {
+      sendDiscordMessage(channelId, report);
+      drawStatus("News", "Sent");
+    } else {
+      sendDiscordMessage(channelId, report);
+      drawStatus("News", "Error");
+    }
+    return;
+  }
+  if (cmd.startsWith("!physics")) {
+    String report;
+    if (getPhysicsPapers(report)) {
+      sendDiscordMessage(channelId, report);
+      drawStatus("Physics", "Sent");
+    } else {
+      sendDiscordMessage(channelId, report);
+      drawStatus("Physics", "Error");
+    }
+    return;
+  }
+  if (cmd.startsWith("!apod")) {
+    String report;
+    if (getApod(report)) {
+      sendDiscordMessage(channelId, report);
+      drawStatus("APOD", "Sent");
+    } else {
+      sendDiscordMessage(channelId, report);
+      drawStatus("APOD", "Error");
+    }
+    return;
+  }
+  if (cmd.startsWith("!iss")) {
+    String report;
+    if (getIssPosition(report)) {
+      sendDiscordMessage(channelId, report);
+      drawStatus("ISS", "Sent");
+    } else {
+      sendDiscordMessage(channelId, report);
+      drawStatus("ISS", "Error");
     }
     return;
   }

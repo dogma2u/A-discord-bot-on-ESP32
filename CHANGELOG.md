@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0
+
+- Public science commands: `!news` (space/high-tech headlines), `!physics` (arXiv), `!apod` (NASA), `!iss` (ISS position).
+
 ## 0.1.1
 
 - Minor firmware comment and formatting tweaks.
