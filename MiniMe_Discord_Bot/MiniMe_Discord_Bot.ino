@@ -38,7 +38,7 @@ const char* WIFI_PASSWORD = "";
 const char* BOT_TOKEN     = "";
 const char* WEATHER_API_KEY = "";
 const char* NASA_API_KEY    = "";
-const char* DEEPSEEK_API_KEY = ""; // from https://platform.deepseek.com/api_keys
+const char* DEEPSEEK_API_KEY = "";
 
 // ====== OWNER AND CHANNEL IDS ======
 const String OWNER_ID_STR        = "";
