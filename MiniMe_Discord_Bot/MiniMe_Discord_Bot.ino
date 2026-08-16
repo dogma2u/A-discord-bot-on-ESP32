@@ -12,6 +12,7 @@
 • !help — Shows this command list.
  Owner-Only Commands:
 • !status — Checks WiFi and Discord Gateway connection status.
+• !ask <question> — Asks DeepSeek (text AI reply in chat).
 • !led on / !led off — Controls the RGB NeoPixel LED.
 • !set1 on / !set1 off — Controls digital output pin 1.
 • !set2 on / !set2 off — Controls digital output pin 2.
@@ -37,6 +38,7 @@ const char* WIFI_PASSWORD = "";
 const char* BOT_TOKEN     = "";
 const char* WEATHER_API_KEY = "";
 const char* NASA_API_KEY    = "";
+const char* DEEPSEEK_API_KEY = ""; // from https://platform.deepseek.com/api_keys
 
 // ====== OWNER AND CHANNEL IDS ======
 const String OWNER_ID_STR        = "";
@@ -463,6 +465,197 @@ bool getIssPosition(String& outReport) {
               "• **Longitude:** " + lon;
   return true;
 }
+bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
+                              String& outBody, unsigned long deadlineMs) {
+  outBody = "";
+  const size_t maxBody = 12000;
+  if (chunked) {
+    while (millis() < deadlineMs) {
+      while (!client.available() && client.connected() && millis() < deadlineMs) {
+        delay(5);
+      }
+      if (!client.available()) break;
+      String sizeLine = client.readStringUntil('\n');
+      sizeLine.trim();
+      if (sizeLine.length() == 0) continue;
+      int sc = sizeLine.indexOf(';');
+      if (sc >= 0) sizeLine = sizeLine.substring(0, sc);
+      long chunkSize = strtol(sizeLine.c_str(), nullptr, 16);
+      if (chunkSize <= 0) break;
+      long got = 0;
+      while (got < chunkSize && millis() < deadlineMs) {
+        if (client.available()) {
+          outBody += (char)client.read();
+          got++;
+          if (outBody.length() >= maxBody) return true;
+        } else if (!client.connected()) {
+          break;
+        } else {
+          delay(1);
+        }
+      }
+      client.readStringUntil('\n');
+    }
+    return outBody.length() > 0;
+  }
+  if (contentLength > 0) {
+    while ((int)outBody.length() < contentLength && millis() < deadlineMs) {
+      while (client.available()) {
+        outBody += (char)client.read();
+        if ((int)outBody.length() >= contentLength || outBody.length() >= maxBody) break;
+      }
+      if (!client.connected() && !client.available()) break;
+      delay(5);
+    }
+    return outBody.length() > 0;
+  }
+  while (millis() < deadlineMs) {
+    while (client.available()) {
+      outBody += (char)client.read();
+      if (outBody.length() >= maxBody) return true;
+    }
+    if (!client.connected() && !client.available()) break;
+    delay(10);
+  }
+  return outBody.length() > 0;
+}
+bool askDeepSeek(const String& question, String& outReport) {
+  if (DEEPSEEK_API_KEY == nullptr || strlen(DEEPSEEK_API_KEY) == 0) {
+    outReport = "DeepSeek API key not set. Add DEEPSEEK_API_KEY in the sketch.";
+    return false;
+  }
+  String q = question;
+  q.trim();
+  if (q.length() == 0) {
+    outReport = "Usage: !ask <question>";
+    return false;
+  }
+  if (q.length() > 500) {
+    q = q.substring(0, 500);
+  }
+  StaticJsonDocument<1536> req;
+  req["model"] = "deepseek-chat";
+  req["max_tokens"] = 220;
+  req["temperature"] = 0.7;
+  req["stream"] = false;
+  JsonArray messages = req.createNestedArray("messages");
+  JsonObject sys = messages.createNestedObject();
+  sys["role"] = "system";
+  sys["content"] = "You are MiniMe on an ESP32 Discord bot. Answer clearly and briefly for science, tech, and physics. Keep replies under 200 words.";
+  JsonObject user = messages.createNestedObject();
+  user["role"] = "user";
+  user["content"] = q;
+  String body;
+  serializeJson(req, body);
+
+  httpsClient.stop();
+  httpsClient.setInsecure();
+  httpsClient.setTimeout(25000);
+  if (!httpsClient.connect("api.deepseek.com", 443)) {
+    outReport = "DeepSeek connection failed.";
+    return false;
+  }
+  String request =
+    "POST /chat/completions HTTP/1.1\r\n"
+    "Host: api.deepseek.com\r\n"
+    "Authorization: Bearer " + String(DEEPSEEK_API_KEY) + "\r\n"
+    "Content-Type: application/json\r\n"
+    "Accept: application/json\r\n"
+    "Accept-Encoding: identity\r\n"
+    "User-Agent: MiniMeBot/1.0\r\n"
+    "Content-Length: " + String(body.length()) + "\r\n"
+    "Connection: close\r\n\r\n" +
+    body;
+  httpsClient.print(request);
+
+  unsigned long deadline = millis() + 30000UL;
+  while (httpsClient.available() == 0) {
+    if (millis() > deadline) {
+      outReport = "DeepSeek timeout waiting for headers.";
+      httpsClient.stop();
+      return false;
+    }
+    delay(10);
+  }
+  String statusLine = httpsClient.readStringUntil('\n');
+  statusLine.trim();
+  bool chunked = false;
+  int contentLength = -1;
+  while (millis() <= deadline) {
+    String line = httpsClient.readStringUntil('\n');
+    if (line == "\r" || line.length() == 0) break;
+    String lower = line;
+    lower.toLowerCase();
+    if (lower.startsWith("transfer-encoding:") && lower.indexOf("chunked") >= 0) {
+      chunked = true;
+    }
+    if (lower.startsWith("content-length:")) {
+      contentLength = lower.substring(lower.indexOf(':') + 1).toInt();
+    }
+  }
+
+  String respBody;
+  if (!readHttpBodyAfterHeaders(httpsClient, chunked, contentLength, respBody, deadline)) {
+    httpsClient.stop();
+    outReport = "DeepSeek empty response. " + statusLine;
+    return false;
+  }
+  httpsClient.stop();
+
+  int jsonStart = respBody.indexOf('{');
+  if (jsonStart < 0) {
+    outReport = "DeepSeek: no JSON body. " + truncateText(statusLine, 80);
+    return false;
+  }
+  if (jsonStart > 0) {
+    respBody = respBody.substring(jsonStart);
+  }
+
+  StaticJsonDocument<128> filter;
+  filter["choices"][0]["message"]["content"] = true;
+  filter["error"]["message"] = true;
+  StaticJsonDocument<6144> doc;
+  DeserializationError err = deserializeJson(doc, respBody, DeserializationOption::Filter(filter));
+  if (err) {
+    outReport = "DeepSeek JSON parse error (" + String(err.c_str()) + ").";
+    return false;
+  }
+  if (doc.containsKey("error")) {
+    String emsg = doc["error"]["message"] | "API error";
+    outReport = "DeepSeek error: " + truncateText(emsg, 200);
+    return false;
+  }
+  String answer = collapseWhitespace(doc["choices"][0]["message"]["content"] | "");
+  if (answer.length() == 0) {
+    // Fallback: crude extract if filter missed nested shape
+    int ckey = respBody.indexOf("\"content\"");
+    if (ckey >= 0) {
+      int colon = respBody.indexOf(':', ckey);
+      int q1 = respBody.indexOf('"', colon + 1);
+      if (q1 >= 0) {
+        String extracted;
+        for (int i = q1 + 1; i < (int)respBody.length(); i++) {
+          char c = respBody[i];
+          if (c == '\\' && i + 1 < (int)respBody.length()) {
+            char n = respBody[i + 1];
+            if (n == 'n') { extracted += ' '; i++; continue; }
+            if (n == '"' || n == '\\') { extracted += n; i++; continue; }
+          }
+          if (c == '"') break;
+          extracted += c;
+          if (extracted.length() > 1800) break;
+        }
+        answer = collapseWhitespace(extracted);
+      }
+    }
+  }
+  if (answer.length() == 0) {
+    outReport = "DeepSeek returned an empty answer. " + truncateText(statusLine, 60);
+    return false;
+  }
+  outReport = "🧠 **DeepSeek:**\n" + truncateText(answer, 1800);
+  return true;
+}
 void handleCommand(const String& content, const String& authorId,
                    const String& channelId, bool isDM)
 {
@@ -483,6 +676,7 @@ if (cmd.startsWith("!help")) {
       "• `!help` — Shows this command list.\n\n"
       "**👑 Owner-Only Commands:**\n"
       "• `!status` — Checks WiFi and Discord Gateway connection status.\n"
+      "• `!ask <question>` — Asks DeepSeek (text AI reply in chat).\n"
       "• `!led on` / `!led off` — Controls the RGB NeoPixel LED.\n"
       "• `!set1 on` / `!set1 off` — Controls digital output pin 1.\n"
       "• `!set2 on` / `!set2 off` — Controls digital output pin 2.\n"
@@ -592,6 +786,25 @@ if (cmd.startsWith("!help")) {
   if (!isOwner(authorId)) {
     if (!isDM) {
       sendDiscordMessage(channelId, "You are not allowed to use this command.");
+    }
+    return;
+  }
+  if (cmd.startsWith("!ask")) {
+    int spaceIdx = cmd.indexOf(' ');
+    if (spaceIdx < 0) {
+      sendDiscordMessage(channelId, "Usage: !ask <question>");
+      return;
+    }
+    String question = cmd.substring(spaceIdx + 1);
+    question.trim();
+    String report;
+    drawStatus("DeepSeek", "Thinking...");
+    if (askDeepSeek(question, report)) {
+      sendDiscordMessage(channelId, report);
+      drawStatus("DeepSeek", "Sent");
+    } else {
+      sendDiscordMessage(channelId, report);
+      drawStatus("DeepSeek", "Error");
     }
     return;
   }

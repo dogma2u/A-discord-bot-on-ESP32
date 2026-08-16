@@ -29,6 +29,7 @@ This is the same list Discord shows when you type `!help`:
 Only the Discord user ID in `OWNER_ID_STR` can use these. Other users in a server channel get “You are not allowed to use this command.”
 
 - `!status` — Checks WiFi and Discord Gateway connection status.
+- `!ask <question>` — Asks DeepSeek (text AI reply in chat).
 - `!led on` / `!led off` — Controls the RGB NeoPixel LED.
 - `!set1 on` / `!set1 off` — Controls digital output pin 1.
 - `!set2 on` / `!set2 off` — Controls digital output pin 2.
@@ -56,6 +57,7 @@ const char* WIFI_PASSWORD = "password";
 const char* BOT_TOKEN     = "bot token";
 const char* WEATHER_API_KEY = "WEATHER_API_KEY";
 const char* NASA_API_KEY    = "DEMO_KEY";
+const char* DEEPSEEK_API_KEY = "DEEPSEEK_API_KEY";
 
 const String OWNER_ID_STR        = "OWNER_ID_STR";
 const char*  TEMP_CHANNEL_ID_STR = "TEMP_CHANNEL_ID_ST";  // reserved / main channel
@@ -68,6 +70,7 @@ const String TARGET_CHANNEL_ID = "TARGET_CHANNEL_ID";
 | `BOT_TOKEN` | Discord Gateway + REST messages |
 | `WEATHER_API_KEY` | OpenWeatherMap `!weather` |
 | `NASA_API_KEY` | NASA APOD for `!apod` (optional; `DEMO_KEY` works with strict limits) |
+| `DEEPSEEK_API_KEY` | DeepSeek chat for owner-only `!ask` |
 | `OWNER_ID_STR` | Who can run hardware commands |
 | `TARGET_CHANNEL_ID` | Auto sysinfo and scheduled summaries |
 | `TEMP_CHANNEL_ID_STR` | Placeholder for a “main” channel ID (not used by commands yet) |
@@ -155,6 +158,18 @@ These are public, like `!weather`. They fetch a short digest so the ESP32 stays 
 1. Open [api.nasa.gov](https://api.nasa.gov/) and generate a free key (email signup).
 2. Paste it into `NASA_API_KEY`.
 3. Until then, `DEMO_KEY` works for light testing but is shared and rate-limited. Use your own key if `!apod` starts failing.
+
+---
+
+## How to get a DeepSeek key (`DEEPSEEK_API_KEY`)
+
+1. Create an account at [DeepSeek Platform](https://platform.deepseek.com/).
+2. Open [API Keys](https://platform.deepseek.com/api_keys).
+3. Create a key and copy it.
+4. Paste it into `DEEPSEEK_API_KEY` in your **local** sketch only (leave `""` in any copy you push to GitHub).
+5. In Discord (owner only): `!ask what is quantum entanglement?`
+6. Replies are short text in the channel (not voice). The ESP32 waits on HTTPS, so answers can take several seconds.
+7. Non-owners who try `!ask` get “You are not allowed to use this command.”
 
 ---
 
