@@ -35,7 +35,7 @@ Only the Discord user ID in `OWNER_ID_STR` can use these. Other users in a serve
 
 These go to `TARGET_CHANNEL_ID` without anyone typing a command:
 
-- **Every 10 minutes:** system diagnostics (`!sysinfo` style)
+- **Every 4 Hours:** system diagnostics (`!sysinfo` style)
 - **Daily at 6:00, 12:00, and 18:00** (bot local time): indoor temperature summary
 
 Time uses NTP (`pool.ntp.org`) and `UTC_OFFSET_SEC` (default `-28800` = UTC−8).
