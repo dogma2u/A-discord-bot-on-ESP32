@@ -30,9 +30,9 @@
 const char* WIFI_SSID     = "ssid";
 const char* WIFI_PASSWORD = "password";
 const char* BOT_TOKEN     = "bot token";
-const char* WEATHER_API_KEY = "WEATHER_API_KEY";
+const char* WEATHER_API_KEY = " WEATHER_API_KEY";
 // ====== OWNER AND CHANNEL IDS ======
-const String OWNER_ID_STR        = "OWNER_ID_STR";
+const String OWNER_ID_STR        = "OWNER_ID_STR ";
 const char*  TEMP_CHANNEL_ID_STR = "TEMP_CHANNEL_ID_ST";  // main channel
 const String TARGET_CHANNEL_ID = "TARGET_CHANNEL_ID";
 // ====== GPIO CONFIG ======
@@ -240,10 +240,12 @@ bool getWeather(const String& zip, String& outReport) {
   float tempC = (tempF - 32.0f) * 5.0f / 9.0f;
   int humidity = doc["main"]["humidity"] | 0;
   String cond = doc["weather"][0]["description"] | "Unknown";
+  // Formatted like sysinfo with a cloud icon
   outReport = "☁️ **Weather Report (" + city + " - " + zip + "):**\n" +
               "• **Condition:** " + cond + "\n" +
               "• **Temperature:** " + String(tempF, 1) + "°F (" + String(tempC, 1) + "°C)\n" +
               "• **Humidity:** " + String(humidity) + "%";
+              "";
   return true;
 }
 void handleCommand(const String& content, const String& authorId,
@@ -318,7 +320,7 @@ if (cmd.startsWith("!help")) {
   }
   if (cmd.startsWith("!time")) {
     timeClient.update();
-    String currentTime = timeClient.getFormattedTime();
+    String currentTime = timeClient.getFormattedTime(); // Format: HH:MM:SS
     String msg = "🕒 Current Bot Time: " + currentTime;
     sendDiscordMessage(channelId, msg);
     drawStatus("Time", currentTime);
@@ -456,10 +458,12 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
 }
 void backgroundTasks() {
   unsigned long now = millis();
+  // 1. Every 10 Minutes: System Health Report
   if (now - lastSysInfoMillis >= SYSINFO_INTERVAL_MS || lastSysInfoMillis == 0) {
     lastSysInfoMillis = now;
     sendDiscordMessage(TARGET_CHANNEL_ID, getSystemInfo());
   }
+  // 2. Scheduled Daily Summaries (6 AM, 12 PM, 6 PM)
   timeClient.update();
   int currentHour = timeClient.getHours();
   int currentMinute = timeClient.getMinutes();

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- Minor firmware comment and formatting tweaks.
+
 ## 0.1.0
 
 - Initial MiniMe ESP32-S3 Discord bot firmware (commands, weather, sensors, GPIO, OLED, scheduled reports).
