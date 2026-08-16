@@ -1,0 +1,6 @@
+.pio
+.vscode
+.cursor
+*.bin
+secrets.h
+config_local.h
