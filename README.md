@@ -8,30 +8,30 @@ MiniMe is firmware for an **ESP32-S3** that runs a Discord bot on the chip itsel
 
 ## What this bot can do
 
-### Public commands (anyone in a channel the bot can see)
+This is the same list Discord shows when you type `!help`:
 
-| Command | What it does |
-|---|---|
-| `!weather <zip>` | US ZIP weather from OpenWeatherMap (condition, °F/°C, humidity) |
-| `!temp` | Indoor temperature from the DS18B20 sensor |
-| `!sysinfo` | Uptime, free heap, Wi‑Fi RSSI, gateway status |
-| `!time` | Current bot time from NTP |
-| `!help` | Lists all commands |
+**MiniMe Bot Commands**
 
-### Owner-only commands
+**Public Commands:**
+
+- `!weather <zip>` — Fetches the weather report for a US ZIP code.
+- `!temp` — Reads the current indoor temperature sensor.
+- `!sysinfo` — Displays system diagnostics (uptime, heap, RSSI, etc.).
+- `!time` — Displays the current bot time.
+- `!help` — Shows this command list.
+
+**Owner-Only Commands:**
 
 Only the Discord user ID in `OWNER_ID_STR` can use these. Other users in a server channel get “You are not allowed to use this command.”
 
-| Command | What it does |
-|---|---|
-| `!status` | Wi‑Fi and Discord Gateway status |
-| `!led on` / `!led off` | RGB NeoPixel on GPIO 48 |
-| `!set1 on` / `!set1 off` | Digital output GPIO 6 |
-| `!set2 on` / `!set2 off` | Digital output GPIO 7 |
-| `!servo <0-90>` | Servo on GPIO 47 |
-| `!display <text>` | Custom text on the SH1106 OLED |
+- `!status` — Checks WiFi and Discord Gateway connection status.
+- `!led on` / `!led off` — Controls the RGB NeoPixel LED.
+- `!set1 on` / `!set1 off` — Controls digital output pin 1.
+- `!set2 on` / `!set2 off` — Controls digital output pin 2.
+- `!servo <0-90>` — Moves the servo motor to a specific angle.
+- `!display <text>` — Writes custom text to the OLED screen.
 
-### Automatic posts
+### Automatic posts (not in `!help`)
 
 These go to `TARGET_CHANNEL_ID` without anyone typing a command:
 
