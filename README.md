@@ -8,7 +8,14 @@ This repo sketch uses **placeholders only**. Put real Wi‑Fi, tokens, API keys,
 
 *Breadboard prototype: WeAct Studio ESP32-S3-N16R8, 128×128 SSD1327 (GND / VCC / SCL / SDA), and two discrete LEDs.*
 
-Current version: **0.4.0** (see `VERSION` and `CHANGELOG.md`).
+Current version: **0.4.1** (see `VERSION` and `CHANGELOG.md`).
+
+### What changed in 0.4.1
+
+- OLED user-stat block is **seven rows** (was five). Empty slots still show `---`.
+- Display sleep still **only blanks the SSD1327**. The ESP32 and Wi-Fi stay on so Discord commands and presence can wake the panel.
+- Sketch has **section comments** for config, display, user tracking, REST/APIs, commands, Gateway, and `setup`/`loop`.
+- Text is placed with U8g2 `drawStr(x, y)`. **`y` is the font baseline**, not `setCursor`. Header `y=7` is the top of the 128×128 panel.
 
 ---
 
@@ -59,13 +66,15 @@ The display is a **128×128 SSD1327** grayscale OLED, driven with U8g2 (`U8G2_SS
 | Heap | Free memory bar (internal SRAM + 8MB PSRAM) |
 | Temp | DS18B20, or `-- sensor --` if missing |
 | Up Time | days / hours / minutes |
-| Five user rows | name, `On` / `Idle` / `DND` / `Off`, `Bot:N` (commands in the last 24 hours) |
+| Seven user rows | name, `On` / `Idle` / `DND` / `Off`, `Bot:N` (commands in the last 24 hours) |
 
 Empty slots show `---`. Names come from a startup REST member fetch (nick → global name → username). Presence updates from the Gateway. Command counts reset every 24 hours.
 
+**How text is placed:** there is no `setCursor`. U8g2 `drawStr(x, y)` uses **`y` as the font baseline** (bottom of the letters). The 5×7 header at `y=7` occupies about pixels 0–6 (top of the panel). User rows use the 4×6 font with baselines `y = 55 + row * 8` (55, 63, 71, 79, 87, 95, 103).
+
 ### Display sleep
 
-After **10 minutes** with no real events, the panel turns **off** (`setPowerSave`) to rest the OLED.
+After **10 minutes** with no real events, the panel turns **off** (`u8g2.setPowerSave(1)`). That is OLED power-save only. The microcontroller, Wi-Fi, and Discord Gateway keep running.
 
 These **do not** reset the timer: signal bar, clock, heap, uptime, and the 2-second dashboard refresh.
 
@@ -98,7 +107,7 @@ const String TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";
 | `WEATHER_API_KEY` | OpenWeatherMap `!weather` |
 | `NASA_API_KEY` | NASA APOD for `!apod` |
 | `DEEPSEEK_API_KEY` | DeepSeek for `!ask` |
-| `BOT_GUILD_ID` | Guild used at boot to load up to 5 members (numeric snowflake) |
+| `BOT_GUILD_ID` | Guild used at boot to load up to 7 members (numeric snowflake) |
 | `OWNER_ID_STR` | Who can run hardware commands |
 | `TARGET_CHANNEL_ID` | Commands + auto sysinfo / scheduled summaries |
 | `TARGET_CHANNEL_ID1` | Second channel where commands are allowed |

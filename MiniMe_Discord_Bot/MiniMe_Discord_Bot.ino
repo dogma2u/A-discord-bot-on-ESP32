@@ -17,6 +17,15 @@
 • !set2 on / !set2 off — Controls digital output pin 2.
 • !servo <0-90> — Moves the servo motor to a specific angle.
 • !display <text> — Writes custom text to the OLED screen.
+
+ Sketch map (this file, top to bottom):
+ 1) Config, pins, NTP / Pacific DST
+ 2) Discord Gateway state + 7-user presence / 24h command counts
+ 3) SSD1327 dashboard, sleep, overlays (U8g2 drawStr; y is font baseline)
+ 4) GPIO, servo, DS18B20, NeoPixel
+ 5) Discord REST, public HTTP APIs, command handler
+ 6) Gateway websocket, scheduled posts, setup / loop
+ Display sleep blanks the OLED only. ESP32 and Wi-Fi stay running.
 */
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -33,6 +42,7 @@
 #include <time.h>
 #include <esp_heap_caps.h>
 // ====== USER CONFIG ======
+// Local-only secrets. GitHub sketch keeps placeholders. Do not commit real values.
 const char* WIFI_SSID     = "ssid";
 const char* WIFI_PASSWORD = "password";
 const char* BOT_TOKEN     = "bot token";
@@ -42,25 +52,31 @@ const char* DEEPSEEK_API_KEY = "DEEPSEEK_API_KEY";
 // Guild to fetch members from at startup
 #define BOT_GUILD_ID "GUILD_ID"
 // ====== OWNER AND CHANNEL IDS ======
+// OWNER_ID_STR: who may run GPIO / servo / !display.
+// TARGET_CHANNEL_ID: commands + auto sysinfo / 6-12-18 temp posts.
+// TARGET_CHANNEL_ID1: second channel that may run commands.
 const String OWNER_ID_STR        = "OWNER_ID_STR";
 const char*  TEMP_CHANNEL_ID_STR = "TEMP_CHANNEL_ID_STR";  // main channel
 const String TARGET_CHANNEL_ID  = "TARGET_CHANNEL_ID";
 const String TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";
 // ====== GPIO CONFIG ======
+// WeAct ESP32-S3-N16R8 defaults. Change here if wiring differs.
 const int RGB_LED_PIN = 48;
 const int PIN_SERVO   = 47;
 const int PIN_SET1    = 6;
 const int PIN_SET2    = 7;
 const int PIN_DS18B20 = 10;
-// I2C SSD1327
+// I2C SSD1327 128x128 (GND / VCC / SCL / SDA on the module)
 const int PIN_I2C_SDA = 8;
 const int PIN_I2C_SCL = 9;
 // ====== TIME CONFIG (NTP) — US Pacific, with daylight saving ======
+// NTP is fetched as UTC, then offset to PST or PDT for the dashboard clock and scheduled posts.
 WiFiUDP ntpUDP;
 const long PST_OFFSET_SEC = -28800; // UTC-8 standard
 const long PDT_OFFSET_SEC = -25200; // UTC-7 daylight
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 
+// US Pacific DST: 2nd Sunday in March 02:00 PST through 1st Sunday in November 02:00 PDT.
 int civilDayOfWeek(int year, int month, int day) { // 0 = Sunday
   static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
   int y = year;
@@ -103,10 +119,12 @@ void updateLocalTime() {
   timeClient.setTimeOffset(isPacificDaylightTime(utc) ? PDT_OFFSET_SEC : PST_OFFSET_SEC);
 }
 // ====== SCHEDULED & INTERVAL TASKS ======
+// 4-hour sysinfo and 06:00 / 12:00 / 18:00 Pacific indoor-temp posts go to TARGET_CHANNEL_ID.
 const unsigned long SYSINFO_INTERVAL_MS = 14400000UL; // 4 Hours
 unsigned long lastSysInfoMillis = 0;
 int lastSentHour = -1;
 // ====== DISCORD GATEWAY ======
+// Websocket to gateway.discord.gg. gwDoc lives in PSRAM (256KB). Do not put small TLS buffers in PSRAM.
 WebSocketsClient gatewayWS;
 WiFiClientSecure httpsClient;
 DynamicJsonDocument* gwDoc = nullptr;
@@ -118,6 +136,7 @@ int  heartbeatIntervalMs   = 0;
 unsigned long lastHeartbeatMillis = 0;
 int lastSeq               = 0;
 // ====== DISPLAY STATE ======
+// Full-buffer U8g2 on SSD1327. No setCursor: drawStr(x, y) uses y as the font baseline.
 U8G2_SSD1327_EA_W128128_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 void noteDisplayActivity();
 
@@ -129,9 +148,8 @@ String dashLastEvent = "Starting...";
 unsigned long dashLastCmdMillis = 0;
 
 // ---- User usage + presence tracking (for dashboard) ----
-// Requirement you gave: each user gets their own line, show their name,
-// whether they are on/idle/off, and how many times they used the bot
-// in the last 24 hours (reset every 24 hours).
+// Seven OLED rows: name, On/Idle/DND/Off, Bot:N (commands in the last 24h).
+// Slots fill from a startup REST member list; presence comes from the Gateway.
 struct TrackedUser {
   String userId;
   String userName;
@@ -140,13 +158,14 @@ struct TrackedUser {
   bool active;
 };
 
-static const uint8_t MAX_TRACKED_USERS = 5;
+static const uint8_t MAX_TRACKED_USERS = 7;
 TrackedUser trackedUsers[MAX_TRACKED_USERS];
 String cachedGuildId = "";
 
 unsigned long usesWindowStartMillis = 0;
 const unsigned long USES_WINDOW_MS = 86400UL * 1000UL; // 24 hours
 
+// Discord presence string -> dashboard status byte (0 Off, 1 Idle, 2 On, 3 DND).
 uint8_t statusFromDiscord(const char* status) {
   if (!status) return 0;
   if (strcmp(status, "online") == 0) return 2;
@@ -228,6 +247,7 @@ int addOrPickUserSlot(const String& userId, const String& userName) {
   return (int)worst;
 }
 
+// Called on each allowed command: bump 24h count and treat that user as On.
 void recordUserUse(const String& userId, const String& userName) {
   resetUseWindowIfNeeded();
   if (userId.length() == 0) return;
@@ -243,6 +263,7 @@ void recordUserUse(const String& userId, const String& userName) {
   noteDisplayActivity();
 }
 
+// Apply a Gateway presences[] array to tracked users (READY / GUILD_CREATE / GUILD_MEMBERS_CHUNK).
 void applyPresencesArray(JsonArray presences) {
   if (presences.isNull()) return;
   for (JsonObject p : presences) {
@@ -263,6 +284,7 @@ void applyPresencesArray(JsonArray presences) {
   }
 }
 
+// Gateway OP 8: ask Discord for current presence of the seven tracked user IDs.
 void requestTrackedUserPresences() {
   if (cachedGuildId.length() < 16) return;
   bool any = false;
@@ -292,6 +314,7 @@ void requestTrackedUserPresences() {
   Serial.println("[GW] Request Guild Members (presences) sent");
 }
 
+// Live PRESENCE_UPDATE: refresh name/status; may occupy a free dashboard slot.
 void handlePresenceUpdate(JsonObject d) {
   const char* uid = d["user"]["id"];
   const char* st  = d["status"] | "offline";
@@ -318,13 +341,13 @@ void handlePresenceUpdate(JsonObject d) {
   }
 }
 
-// Transient overlay: when non-empty, show this instead of dashboard for a few seconds
+// Transient overlay: three lines that replace the dashboard for a few seconds (commands, GW, !display).
 String transientLine1 = "";
 String transientLine2 = "";
 String transientLine3 = "";
 unsigned long transientUntilMs = 0;
 
-// Dashboard refresh throttle
+// Dashboard refresh + OLED sleep. Sleep uses setPowerSave on the panel only; MCU and Wi-Fi stay up.
 unsigned long lastDashMillis = 0;
 const unsigned long DASH_REFRESH_MS = 2000;
 unsigned long lastDisplayActivityMillis = 0;
@@ -332,10 +355,10 @@ bool displayAsleep = false;
 const unsigned long DISPLAY_IDLE_MS = 600000UL; // 10 minutes
 const uint8_t DISPLAY_CONTRAST_FULL = 255;
 
-// ====== TEMP SENSOR ======
+// ====== TEMP SENSOR (DS18B20 on PIN_DS18B20) ======
 OneWire oneWire(PIN_DS18B20);
 DallasTemperature sensors(&oneWire);
-// ====== NEOPIXEL ======
+// ====== NEOPIXEL (owner !led) ======
 Adafruit_NeoPixel pixels(1, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // ====== FORWARD DECLARATIONS ======
@@ -345,10 +368,9 @@ bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
 bool discordIdLooksValid(const String& id);
 
 // ====== DISPLAY UTILS ======
+// Wake/sleep, overlays, dashboard paint. U8g2 y is baseline (not Adafruit setCursor).
 
-// (old rolling-window "last user" logic removed; replaced with multi-user + 24h reset)
-
-// Show a brief transient message (replaces dashboard for durationMs ms)
+// Wake the panel if it was in power-save, and restart the 10-minute idle timer.
 void noteDisplayActivity() {
   lastDisplayActivityMillis = millis();
   if (displayAsleep) {
@@ -359,6 +381,7 @@ void noteDisplayActivity() {
   }
 }
 
+// After 10 minutes with no real events, blank the OLED. Clock/RSSI/heap ticks do not count.
 void updateDisplaySleep() {
   if (displayAsleep) return;
   if (lastDisplayActivityMillis == 0) {
@@ -371,6 +394,7 @@ void updateDisplaySleep() {
   }
 }
 
+// Queue a 3-line overlay (replaces dashboard until durationMs).
 void showTransient(const String& line1, const String& line2 = "", const String& line3 = "", unsigned long durationMs = 3000) {
   noteDisplayActivity();
   transientLine1 = line1;
@@ -380,6 +404,8 @@ void showTransient(const String& line1, const String& line2 = "", const String& 
 }
 
 // Draw the persistent dashboard (128x128 SSD1327)
+// U8g2 drawStr(x, y): y is the FONT BASELINE, not the top of the glyph and not setCursor.
+// 5x7 font is 7px tall, so header at y=7 sits on the top of the panel (pixels ~0-6).
 // Font: u8g2_font_5x7_tf = 5px wide + 1px gap = 6px/char, 7px tall + 1px gap = 8px/row
 // Grid: 16 rows x 18 chars on 128x128
 // Row baselines (y = row*8, glyph baseline at y+7):
@@ -394,6 +420,8 @@ void showTransient(const String& line1, const String& line2 = "", const String& 
 //   Row 8  y=71  User3: Name <On|Idle|DND|Off> Count
 //   Row 9  y=79  User4: Name <On|Idle|DND|Off> Count
 //   Row 10 y=87  User5: Name <On|Idle|DND|Off> Count
+//   Row 11 y=95  User6: Name <On|Idle|DND|Off> Count
+//   Row 12 y=103 User7: Name <On|Idle|DND|Off> Count
 void drawDashboard() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_5x7_tf);
@@ -462,9 +490,8 @@ void drawDashboard() {
   snprintf(upBuf, sizeof(upBuf), "Up Time:%lud%luh%lum", d, h, m);
   u8g2.drawStr(0, 47, upBuf);
 
-  // ---- Rows 6-10: Users ----
-  // 4x6 font so names keep more of the 128px width.
-  // Name left, status aligned after the longest name, Bot:N right-justified.
+  // ---- Rows 6-12: seven user stats (4x6 font) ----
+  // Name left, status after the longest name, Bot:N right-justified. Empty slots show ---.
   u8g2.setFont(u8g2_font_4x6_tf);
   const int gapPx = 4;
   const int statusW = u8g2.getStrWidth("Idle");
@@ -488,8 +515,8 @@ void drawDashboard() {
   if (longestNamePx > nameMaxPx) longestNamePx = nameMaxPx;
   int statusX = longestNamePx + gapPx;
 
-  for (uint8_t row = 0; row < 5; row++) {
-    uint8_t y = 55 + (row * 8);
+  for (uint8_t row = 0; row < MAX_TRACKED_USERS; row++) {
+    uint8_t y = 55 + (row * 8); // baseline: 55, 63, 71, 79, 87, 95, 103
     String name = names[row];
     while (name.length() > 1 && u8g2.getStrWidth(name.c_str()) > longestNamePx) {
       name.remove(name.length() - 1);
@@ -519,7 +546,7 @@ void drawTransient() {
   u8g2.sendBuffer();
 }
 
-// Called from loop — manages transient vs dashboard
+// Called from loop: sleep check, then overlay or 2s dashboard refresh.
 void updateDisplay() {
   updateDisplaySleep();
   if (displayAsleep) return;
@@ -544,7 +571,7 @@ void drawStatus(const String& line1, const String& line2 = "", const String& lin
   drawTransient();
 }
 
-// ====== SERVO ======
+// ====== SERVO (LEDC 50Hz PWM, owner !servo 0-90) ======
 void setupServo() {
   ledc_timer_config_t timer = {
     .speed_mode       = LEDC_LOW_SPEED_MODE,
@@ -574,6 +601,7 @@ void setServoAngle(int angleDeg) {
   ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
   ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
+// Boot: NeoPixel, set1/set2 outputs, servo parked at 0 degrees.
 void setupPins() {
   pinMode(RGB_LED_PIN, OUTPUT);
   digitalWrite(RGB_LED_PIN, LOW);
@@ -586,6 +614,7 @@ void setupPins() {
   setupServo();
   setServoAngle(0);
 }
+// DS18B20 read for dashboard, !temp, and scheduled summaries.
 bool readTemperature(float &tempC, float &tempF) {
   sensors.requestTemperatures();
   float c = sensors.getTempCByIndex(0);
@@ -596,6 +625,7 @@ bool readTemperature(float &tempC, float &tempF) {
   tempF = c * 9.0f / 5.0f + 32.0f;
   return true;
 }
+// Discord body for !sysinfo and the 4-hour auto post (heap includes 8MB PSRAM).
 String getSystemInfo() {
   long rssi = WiFi.RSSI();
   uint32_t psramSize = ESP.getPsramSize();
@@ -616,6 +646,7 @@ String getSystemInfo() {
          "• **WiFi RSSI:** " + String(rssi) + " dBm\n"
          "• **Gateway Status:** " + String(gatewayConnected ? "Connected" : "Disconnected");
 }
+// Discord REST: POST a chat message to a channel.
 bool sendDiscordMessage(const String& channelId, const String& content) {
   httpsClient.stop();
   httpsClient.setInsecure();
@@ -648,6 +679,7 @@ bool sendDiscordMessage(const String& channelId, const String& content) {
   httpsClient.stop();
   return true;
 }
+// Gateway OP 2 IDENTIFY after HELLO. Intents 37635 include members + presences + message content.
 void sendIdentify() {
   StaticJsonDocument<1024> doc;
   doc["op"] = 2;
@@ -666,6 +698,7 @@ void sendIdentify() {
   gatewayWS.sendTXT(payload);
   Serial.println("[GW] IDENTIFY sent");
 }
+// Gateway OP 1 keep-alive. Interval comes from HELLO (op 10).
 void sendHeartbeat() {
   StaticJsonDocument<256> doc;
   doc["op"] = 1;
@@ -682,6 +715,7 @@ void sendHeartbeat() {
 bool isOwner(const String& authorId) {
   return authorId == OWNER_ID_STR;
 }
+// ====== PUBLIC HTTP APIs (Discord commands) ======
 bool getWeather(const String& zip, String& outReport) {
   WiFiClient client;
   if (!client.connect("api.openweathermap.org", 80)) {
@@ -736,6 +770,7 @@ bool skipHttpHeaders(Client& client, unsigned long timeoutMs) {
   return true;
 }
 
+// Snowflake IDs are digit strings (user, channel, guild).
 bool discordIdLooksValid(const String& id) {
   if (id.length() < 16) return false;
   for (unsigned int i = 0; i < id.length(); i++) {
@@ -745,6 +780,7 @@ bool discordIdLooksValid(const String& id) {
   return true;
 }
 
+// Discord REST GET helper (members, channel lookup). Handles chunked bodies.
 bool discordRestGet(const String& path, String& outBody, String& outStatus) {
   outBody = "";
   httpsClient.stop();
@@ -794,6 +830,7 @@ bool discordRestGet(const String& path, String& outBody, String& outStatus) {
   return ok;
 }
 
+// Use BOT_GUILD_ID if valid; otherwise look up guild from TARGET_CHANNEL_ID.
 String resolveGuildIdAtStartup() {
   String guildId = String(BOT_GUILD_ID);
   guildId.trim();
@@ -833,6 +870,7 @@ String resolveGuildIdAtStartup() {
   return gid;
 }
 
+// Boot: load up to seven non-bot members for the OLED name rows.
 bool fetchGuildMembersAtStartup() {
   String guildId = resolveGuildIdAtStartup();
   if (!discordIdLooksValid(guildId)) {
@@ -908,6 +946,7 @@ bool fetchGuildMembersAtStartup() {
   return slot > 0;
 }
 
+// ====== SCIENCE / AI HTTP HELPERS ======
 String collapseWhitespace(String s) {
   s.replace("\n", " ");
   s.replace("\r", " ");
@@ -922,6 +961,7 @@ String truncateText(const String& s, int maxLen) {
   if (s.length() <= maxLen) return s;
   return s.substring(0, maxLen - 3) + "...";
 }
+// !news — Spaceflight News API, 3 headlines.
 bool getScienceNews(String& outReport) {
   httpsClient.stop();
   httpsClient.setInsecure();
@@ -969,6 +1009,7 @@ bool getScienceNews(String& outReport) {
   }
   return n > 0;
 }
+// !physics — arXiv cat:physics, 3 newest papers.
 bool getPhysicsPapers(String& outReport) {
   httpsClient.stop();
   httpsClient.setInsecure();
@@ -1035,6 +1076,7 @@ bool getPhysicsPapers(String& outReport) {
   }
   return true;
 }
+// !apod — NASA Astronomy Picture of the Day.
 bool getApod(String& outReport) {
   httpsClient.stop();
   httpsClient.setInsecure();
@@ -1074,6 +1116,7 @@ bool getApod(String& outReport) {
   if (url.length()) outReport += "\n" + url;
   return true;
 }
+// !iss — Open Notify ISS lat/lon.
 bool getIssPosition(String& outReport) {
   WiFiClient client;
   if (!client.connect("api.open-notify.org", 80)) {
@@ -1103,6 +1146,7 @@ bool getIssPosition(String& outReport) {
               "• **Longitude:** " + lon;
   return true;
 }
+// Shared HTTP body reader (chunked or Content-Length). Used by Discord REST and DeepSeek.
 bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
                               String& outBody, unsigned long deadlineMs) {
   outBody = "";
@@ -1157,6 +1201,7 @@ bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
   }
   return outBody.length() > 0;
 }
+// !ask — DeepSeek chat completion (short reply for ESP32 memory/time limits).
 bool askDeepSeek(const String& question, String& outReport) {
   if (DEEPSEEK_API_KEY == nullptr || strlen(DEEPSEEK_API_KEY) == 0) {
     outReport = "DeepSeek API key not set. Add DEEPSEEK_API_KEY in the sketch.";
@@ -1288,6 +1333,8 @@ bool askDeepSeek(const String& question, String& outReport) {
   outReport = "🧠 **DeepSeek:**\n" + truncateText(answer, 1800);
   return true;
 }
+// ====== DISCORD COMMAND DISPATCH ======
+// Public commands first; anything else requires OWNER_ID_STR.
 void handleCommand(const String& content, const String& authorId, const String& authorName,
                    const String& channelId, bool isDM)
 {
@@ -1465,6 +1512,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
     }
     return;
   }
+  // Owner-only hardware: LED, set1/set2, servo, !display overlay.
   if (!isOwner(authorId)) {
     if (!isDM) {
       sendDiscordMessage(channelId, "You are not allowed to use this command.");
@@ -1555,6 +1603,8 @@ void handleCommand(const String& content, const String& authorId, const String& 
     return;
   }
 }
+// ====== DISCORD GATEWAY WEBSOCKET ======
+// HELLO -> IDENTIFY; READY / GUILD_* / PRESENCE_UPDATE for OLED; MESSAGE_CREATE -> handleCommand.
 void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED:
@@ -1658,6 +1708,7 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
       break;
   }
 }
+// Auto Discord posts: 4-hour sysinfo; 06:00 / 12:00 / 18:00 Pacific indoor temp.
 void backgroundTasks() {
   unsigned long now = millis();
   // Every 4 hours: System Health Report
@@ -1689,6 +1740,7 @@ void backgroundTasks() {
     }
   }
 }
+// Station Wi-Fi. Blocks until connected (OLED shows Connecting / Connected).
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -1698,11 +1750,13 @@ void connectWiFi() {
   }
   drawStatus("WiFi", "Connected");
 }
+// Discord Gateway websocket (JSON encoding, auto-reconnect 5s).
 void connectGateway() {
   gatewayWS.beginSSL("gateway.discord.gg", 443, "/?v=10&encoding=json");
   gatewayWS.onEvent(gatewayEvent);
   gatewayWS.setReconnectInterval(5000);
 }
+// Boot: serial, PSRAM JSON, OLED, pins, Wi-Fi, NTP, member list, then Gateway.
 void setup() {
   Serial.begin(115200);
   delay(50);
@@ -1732,6 +1786,7 @@ void setup() {
   connectGateway();
   drawStatus("Ready", "Idle presence");
 }
+// Gateway pump, heartbeat, scheduled posts, OLED refresh/sleep. MCU never sleeps here.
 void loop() {
   gatewayWS.loop();
   if (heartbeatIntervalMs > 0 && gatewayConnected && identified) {

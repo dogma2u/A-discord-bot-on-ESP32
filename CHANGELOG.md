@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+- Dashboard user stats: seven rows (was five).
+- Sketch section comments for each major block (config, OLED, users, APIs, Gateway, setup/loop).
+- README: 0.4.1 notes, U8g2 baseline (no setCursor), OLED sleep does not power down MCU or Wi-Fi, member load is 7.
+
 ## 0.4.0
 
 - SSD1327 128×128 dashboard: MiniMe header, gateway, Pacific time, Sig/Heap bars, temp, uptime, five users with presence and 24h command counts.
