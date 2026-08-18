@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- SSD1327 128×128 dashboard: MiniMe header, gateway, Pacific time, Sig/Heap bars, temp, uptime, five users with presence and 24h command counts.
+- Startup REST member load (`BOT_GUILD_ID` / channel guild resolve) plus Presence Intent for On / Idle / DND / Off.
+- OLED sleeps after 10 minutes with no real events (Sig/time/heap ticks do not count); commands, presence changes, and gateway messages wake it.
+- Public `!ask`; `!status` removed. Commands work in DMs and two allowed channels.
+- US Pacific DST time, 8MB PSRAM gateway JSON, `!sysinfo` heap includes PSRAM.
+- README rewrite, breadboard photo, no secrets in the GitHub sketch.
+
 ## 0.3.2
 
 - Make `!ask` owner-only; update README and help text.

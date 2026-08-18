@@ -1,81 +1,112 @@
-# A Discord Bot on ESP32
+# MiniMe — a Discord bot on ESP32-S3
 
-MiniMe is firmware for an **ESP32-S3** that runs a Discord bot on the chip itself. It connects to Wi‑Fi, joins the Discord Gateway, reads sensors, and drives hardware from chat commands.
+MiniMe is firmware for a **WeAct Studio ESP32-S3-N16R8** that runs a Discord bot on the chip. It joins Wi‑Fi and the Discord Gateway, reads sensors, drives GPIO from chat, and shows a live dashboard on a **128×128 SSD1327** OLED.
 
-**Do not put real tokens, API keys, or IDs in GitHub.** Keep those only in your local copy of `MiniMe_Discord_Bot.ino`.
+This repo sketch uses **placeholders only**. Put real Wi‑Fi, tokens, API keys, and Discord IDs in a **local** copy of `MiniMe_Discord_Bot/MiniMe_Discord_Bot.ino`. Do not commit or push that copy.
+
+![MiniMe ESP32-S3 breadboard prototype with SSD1327 OLED](docs/minime-breadboard.png)
+
+*Breadboard prototype: WeAct Studio ESP32-S3-N16R8, 128×128 SSD1327 (GND / VCC / SCL / SDA), and two discrete LEDs.*
+
+Current version: **0.4.0** (see `VERSION` and `CHANGELOG.md`).
 
 ---
 
 ## What this bot can do
 
-This is the same list Discord shows when you type `!help`:
+Same list Discord shows for `!help`:
 
-**MiniMe Bot Commands**
+**Public commands** (DMs, `TARGET_CHANNEL_ID`, or `TARGET_CHANNEL_ID1`):
 
-**Public Commands:**
+- `!weather <zip>` — US ZIP weather (OpenWeatherMap)
+- `!temp` — indoor DS18B20 temperature
+- `!sysinfo` — uptime, free heap (internal + 8MB PSRAM), Wi‑Fi RSSI, gateway
+- `!time` — bot local time (US Pacific, DST aware)
+- `!news` — space / high-tech headlines
+- `!physics` — latest arXiv physics papers
+- `!apod` — NASA Astronomy Picture of the Day
+- `!iss` — International Space Station position
+- `!ask <question>` — DeepSeek text reply in chat
+- `!help` — this command list
 
-- `!weather <zip>` — Fetches the weather report for a US ZIP code.
-- `!temp` — Reads the current indoor temperature sensor.
-- `!sysinfo` — Displays system diagnostics (uptime, heap, RSSI, etc.).
-- `!time` — Displays the current bot time.
-- `!news` — Space and high-tech science headlines.
-- `!physics` — Latest arXiv physics papers.
-- `!apod` — NASA Astronomy Picture of the Day.
-- `!iss` — Current International Space Station position.
-- `!help` — Shows this command list.
+**Owner-only** (`OWNER_ID_STR`):
 
-**Owner-Only Commands:**
+- `!led on` / `!led off` — onboard RGB NeoPixel
+- `!set1 on` / `!set1 off` — digital output pin 1
+- `!set2 on` / `!set2 off` — digital output pin 2
+- `!servo <0-90>` — servo angle
+- `!display <text>` — custom OLED overlay
 
-Only the Discord user ID in `OWNER_ID_STR` can use these. Other users in a server channel get “You are not allowed to use this command.”
+`!status` is **not** in this firmware.
 
-- `!status` — Checks WiFi and Discord Gateway connection status.
-- `!ask <question>` — Asks DeepSeek (text AI reply in chat).
-- `!led on` / `!led off` — Controls the RGB NeoPixel LED.
-- `!set1 on` / `!set1 off` — Controls digital output pin 1.
-- `!set2 on` / `!set2 off` — Controls digital output pin 2.
-- `!servo <0-90>` — Moves the servo motor to a specific angle.
-- `!display <text>` — Writes custom text to the OLED screen.
+### Automatic posts
 
-### Automatic posts (not in `!help`)
+Sent to `TARGET_CHANNEL_ID` (no command needed):
 
-These go to `TARGET_CHANNEL_ID` without anyone typing a command:
-
-- **Every 4 Hours:** system diagnostics (`!sysinfo` style)
-- **Daily at 6:00, 12:00, and 18:00** (bot local time): indoor temperature summary
-
-Time uses NTP (`pool.ntp.org`) and `UTC_OFFSET_SEC` (default `-28800` = UTC−8).
+- Every **4 hours:** system diagnostics
+- Daily at **6:00, 12:00, and 18:00** (Pacific): indoor temperature summary
 
 ---
 
-## Fill in these values in the sketch
+## OLED dashboard
 
-Open `MiniMe_Discord_Bot/MiniMe_Discord_Bot.ino` and replace the placeholders:
+The display is a **128×128 SSD1327** grayscale OLED, driven with U8g2 (`U8G2_SSD1327_EA_W128128_F_HW_I2C`).
+
+| Area | What it shows |
+|---|---|
+| Header | `MiniMe`, `GW:good` / `GW:bad`, right-justified `HH:MM:SS` |
+| Sig | Wi‑Fi RSSI bar |
+| Heap | Free memory bar (internal SRAM + 8MB PSRAM) |
+| Temp | DS18B20, or `-- sensor --` if missing |
+| Up Time | days / hours / minutes |
+| Five user rows | name, `On` / `Idle` / `DND` / `Off`, `Bot:N` (commands in the last 24 hours) |
+
+Empty slots show `---`. Names come from a startup REST member fetch (nick → global name → username). Presence updates from the Gateway. Command counts reset every 24 hours.
+
+### Display sleep
+
+After **10 minutes** with no real events, the panel turns **off** (`setPowerSave`) to rest the OLED.
+
+These **do not** reset the timer: signal bar, clock, heap, uptime, and the 2-second dashboard refresh.
+
+These **wake** the panel and restart the 10-minute timer: Discord commands, presence status changes, gateway connect/disconnect, `!display`, scheduled reports, and other transient status messages.
+
+---
+
+## Fill in these values (local sketch only)
+
+Open `MiniMe_Discord_Bot/MiniMe_Discord_Bot.ino` and replace the placeholders. The GitHub file should stay like this:
 
 ```cpp
 const char* WIFI_SSID     = "ssid";
 const char* WIFI_PASSWORD = "password";
 const char* BOT_TOKEN     = "bot token";
 const char* WEATHER_API_KEY = "WEATHER_API_KEY";
-const char* NASA_API_KEY    = "DEMO_KEY";
+const char* NASA_API_KEY    = "NASA_API_KEY";
 const char* DEEPSEEK_API_KEY = "DEEPSEEK_API_KEY";
-
+#define BOT_GUILD_ID "GUILD_ID"
 const String OWNER_ID_STR        = "OWNER_ID_STR";
-const char*  TEMP_CHANNEL_ID_STR = "TEMP_CHANNEL_ID_ST";  // reserved / main channel
-const String TARGET_CHANNEL_ID = "TARGET_CHANNEL_ID";
+const char*  TEMP_CHANNEL_ID_STR = "TEMP_CHANNEL_ID_STR";
+const String TARGET_CHANNEL_ID  = "TARGET_CHANNEL_ID";
+const String TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";
 ```
 
 | Field | Used for |
 |---|---|
 | `WIFI_SSID` / `WIFI_PASSWORD` | ESP32 station Wi‑Fi |
-| `BOT_TOKEN` | Discord Gateway + REST messages |
+| `BOT_TOKEN` | Discord Gateway + REST |
 | `WEATHER_API_KEY` | OpenWeatherMap `!weather` |
-| `NASA_API_KEY` | NASA APOD for `!apod` (optional; `DEMO_KEY` works with strict limits) |
-| `DEEPSEEK_API_KEY` | DeepSeek chat for owner-only `!ask` |
+| `NASA_API_KEY` | NASA APOD for `!apod` |
+| `DEEPSEEK_API_KEY` | DeepSeek for `!ask` |
+| `BOT_GUILD_ID` | Guild used at boot to load up to 5 members (numeric snowflake) |
 | `OWNER_ID_STR` | Who can run hardware commands |
-| `TARGET_CHANNEL_ID` | Auto sysinfo and scheduled summaries |
-| `TEMP_CHANNEL_ID_STR` | Placeholder for a “main” channel ID (not used by commands yet) |
+| `TARGET_CHANNEL_ID` | Commands + auto sysinfo / scheduled summaries |
+| `TARGET_CHANNEL_ID1` | Second channel where commands are allowed |
+| `TEMP_CHANNEL_ID_STR` | Reserved / unused by commands |
 
-IDs are **digits only**, no quotes in Discord itself. Paste them as strings in the sketch, for example `"123456789012345678"`.
+IDs are **digits only**. Paste them as C strings, for example `"123456789012345678"`. Never put real IDs in a commit.
+
+If `BOT_GUILD_ID` is still the placeholder, boot tries to resolve the guild from `TARGET_CHANNEL_ID`.
 
 ---
 
@@ -87,24 +118,22 @@ IDs are **digits only**, no quotes in Discord itself. Paste them as strings in t
 4. If there is no bot yet, click **Add Bot**.
 5. Under **Token**, click **Reset Token** / **Copy**. That string is `BOT_TOKEN`.
 6. Treat it like a password. Anyone with it can control the bot.
-7. Enable these **Privileged Gateway Intents** on the Bot page (this firmware uses them):
+7. Enable these **Privileged Gateway Intents** (this firmware uses them):
    - **Message Content Intent**
-   - **Server Members Intent** is not required for this sketch
-   - Presence is not required
-8. Also turn on:
-   - **Message Content Intent**
-   - The sketch identifies with intents `37377` (guilds, guild messages, DMs, message content).
+   - **Server Members Intent**
+   - **Presence Intent**
+8. Identify intents value in firmware: `37635` (guilds, members, presences, guild messages, DMs, message content). `large_threshold` is `250`.
 
 ### Invite the bot to your server
 
 1. Developer Portal → your app → **OAuth2** → **URL Generator**.
 2. Scopes: `bot`.
-3. Bot permissions (minimum that matches this firmware):
+3. Bot permissions (minimum):
    - View Channels
    - Send Messages
    - Read Message History
 4. Copy the generated URL, open it in a browser, pick your server, authorize.
-5. In Discord, confirm the bot appears offline until the ESP32 connects.
+5. In Discord, the bot stays offline until the ESP32 connects.
 
 ---
 
@@ -113,21 +142,21 @@ IDs are **digits only**, no quotes in Discord itself. Paste them as strings in t
 This is **your Discord user ID**, not the bot’s ID.
 
 1. Discord: **User Settings** → **Advanced** → enable **Developer Mode**.
-2. Right-click **your own avatar** (in a server member list, a DM, or your profile) → **Copy User ID**.
-3. Paste that into `OWNER_ID_STR`.
+2. Right-click **your own avatar** → **Copy User ID**.
+3. Paste that into `OWNER_ID_STR` in the **local** sketch only.
 
-If owner commands never work, you copied a channel ID or the bot’s application ID by mistake.
+If owner commands never work, you copied a channel ID or the application ID by mistake.
 
 ---
 
-## How to get channel IDs (`TARGET_CHANNEL_ID`, `TEMP_CHANNEL_ID_STR`)
+## How to get channel and guild IDs
 
-1. Developer Mode must be on (same as above).
-2. Right-click the **text channel** where you want auto reports → **Copy Channel ID**.
-3. Put that in `TARGET_CHANNEL_ID`.
-4. Optionally copy another channel for `TEMP_CHANNEL_ID_STR` if you plan to use it later.
+Developer Mode must be on.
 
-The bot must be able to **see and send** in that channel (channel permissions + invite permissions).
+- **Channel:** right-click the text channel → **Copy Channel ID**. Use one for `TARGET_CHANNEL_ID` (auto reports) and optionally another for `TARGET_CHANNEL_ID1`.
+- **Guild / server:** right-click the server icon → **Copy Server ID**. That is `BOT_GUILD_ID`.
+
+The bot must be able to **see and send** in those channels.
 
 ---
 
@@ -142,22 +171,22 @@ The bot must be able to **see and send** in that channel (channel permissions + 
 
 ---
 
-## Science / physics commands (no extra keys except APOD)
+## Science / physics commands
 
-These are public, like `!weather`. They fetch a short digest so the ESP32 stays within memory limits.
+These are public. Digests are short so the ESP32 stays within memory limits.
 
 | Command | Source | Key? |
 |---|---|---|
 | `!news` | [Spaceflight News API](https://api.spaceflightnewsapi.net/) — 3 space / high-tech headlines | No |
 | `!physics` | [arXiv](https://arxiv.org/) `cat:physics` — 3 newest papers | No |
-| `!apod` | [NASA APOD](https://api.nasa.gov/) — title, short explanation, image URL | Optional |
+| `!apod` | [NASA APOD](https://api.nasa.gov/) — title, short explanation, image URL | Yes |
 | `!iss` | [Open Notify](http://open-notify.org/) — ISS latitude / longitude | No |
 
 ### How to get a NASA key (`NASA_API_KEY`)
 
 1. Open [api.nasa.gov](https://api.nasa.gov/) and generate a free key (email signup).
-2. Paste it into `NASA_API_KEY`.
-3. Until then, `DEMO_KEY` works for light testing but is shared and rate-limited. Use your own key if `!apod` starts failing.
+2. Paste it into `NASA_API_KEY` locally.
+3. NASA’s `DEMO_KEY` works for light testing but is shared and rate-limited. Use your own key if `!apod` starts failing.
 
 ---
 
@@ -166,14 +195,17 @@ These are public, like `!weather`. They fetch a short digest so the ESP32 stays 
 1. Create an account at [DeepSeek Platform](https://platform.deepseek.com/).
 2. Open [API Keys](https://platform.deepseek.com/api_keys).
 3. Create a key and copy it.
-4. Paste it into `DEEPSEEK_API_KEY` in your **local** sketch only (leave `""` in any copy you push to GitHub).
-5. In Discord (owner only): `!ask what is quantum entanglement?`
-6. Replies are short text in the channel (not voice). The ESP32 waits on HTTPS, so answers can take several seconds.
-7. Non-owners who try `!ask` get “You are not allowed to use this command.”
+4. Paste it into `DEEPSEEK_API_KEY` in your **local** sketch only.
+5. In Discord: `!ask what is quantum entanglement?`
+6. Replies are short text in the channel. HTTPS on the ESP32 can take several seconds.
 
 ---
 
 ## Hardware (default pins)
+
+This board: **WeAct Studio ESP32-S3-N16R8** (**16MB flash**, **8MB PSRAM**).
+
+Display: **SSD1327**, **128×128** pixels, I2C.
 
 | Device | GPIO |
 |---|---|
@@ -182,18 +214,19 @@ These are public, like `!weather`. They fetch a short digest so the ESP32 stays 
 | Digital out 1 (`!set1`) | 6 |
 | Digital out 2 (`!set2`) | 7 |
 | DS18B20 data | 10 |
-| OLED SH1106 SDA | 8 |
-| OLED SH1106 SCL | 9 |
+| OLED SSD1327 (128×128) SDA | 8 |
+| OLED SSD1327 (128×128) SCL | 9 |
 
-Board target: **ESP32-S3**. Change pins in the sketch if your wiring differs.
+OLED module labels: **GND, VCC, SCL, SDA**. The panel is **128×128**. Change pins in the sketch if your wiring differs.
 
 ---
 
 ## Arduino IDE setup
 
 1. Install [Arduino IDE](https://www.arduino.cc/en/software) and the **esp32** board package (Espressif).
-2. Board: an ESP32-S3 module that matches your hardware.
-3. Libraries (Library Manager):
+2. Board: **ESP32-S3**. This hardware is a **WeAct Studio ESP32-S3-N16R8** (N16 = 16MB flash, R8 = 8MB PSRAM).
+3. Tools: enable **OPI PSRAM** (8MB) and a **16MB** flash partition scheme that matches the N16R8.
+4. Libraries (Library Manager):
    - WebSockets (by Markus Sattler)
    - ArduinoJson
    - U8g2
@@ -201,15 +234,17 @@ Board target: **ESP32-S3**. Change pins in the sketch if your wiring differs.
    - DallasTemperature
    - Adafruit NeoPixel
    - NTPClient
-4. Open `MiniMe_Discord_Bot/MiniMe_Discord_Bot.ino`.
-5. Fill in Wi‑Fi, token, weather key, and IDs **locally**.
-6. Upload. Serial monitor 115200: look for `[GW] CONNECTED` and `[GW] IDENTIFY sent`.
-7. In Discord, try `!help`.
+5. Open **your local keyed copy** of `MiniMe_Discord_Bot.ino` (not a OneDrive duplicate unless that is the file you intend).
+6. Fill in Wi‑Fi, token, keys, and IDs **locally**. Leave the GitHub sketch as placeholders.
+7. Upload. Serial monitor **115200**: look for PSRAM size, `[GW] CONNECTED`, and `[GW] IDENTIFY sent`.
+8. In Discord, try `!help`.
+
+Do not enable `heap_caps_malloc_extmem_enable` for small allocations. Wi‑Fi / TLS in PSRAM can crash this board. Gateway JSON (`256KB`) is allocated in PSRAM on purpose.
 
 ---
 
 ## Safety
 
-- Never commit a sketch that contains a live bot token or API key.
+- Never commit a sketch that contains a live bot token, API key, password, or Discord snowflake ID.
 - If a token leaks, reset it in the Developer Portal immediately.
-- Owner commands move a servo and drive GPIO. Only put your user ID in `OWNER_ID_STR`.
+- Owner commands move a servo and drive GPIO. Only put your user ID in `OWNER_ID_STR` on the machine that uploads firmware.
