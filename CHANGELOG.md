@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.3
+
+- `!ask` is queued from the Gateway callback; DeepSeek HTTPS runs from `loop()` with heartbeats pumped so Discord stays connected.
+
 ## 0.4.2
 
 - OLED: eight user rows; `Srv:` bar (0–90°, boot at 45°); command / `!display` text on rows 15–16 (dashboard is not wiped).

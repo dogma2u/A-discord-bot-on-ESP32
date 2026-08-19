@@ -745,6 +745,16 @@ void sendHeartbeat() {
   gatewayWS.sendTXT(payload);
   Serial.println("[GW] HEARTBEAT sent");
 }
+void pumpGateway() {
+  gatewayWS.loop();
+  if (heartbeatIntervalMs > 0 && gatewayConnected && identified) {
+    unsigned long now = millis();
+    if (now - lastHeartbeatMillis >= (unsigned long)heartbeatIntervalMs) {
+      lastHeartbeatMillis = now;
+      sendHeartbeat();
+    }
+  }
+}
 bool isOwner(const String& authorId) {
   return authorId == OWNER_ID_STR;
 }
@@ -1214,6 +1224,11 @@ bool getIssPosition(String& outReport) {
               "• **Longitude:** " + lon;
   return true;
 }
+// !ask DeepSeek: queued from Gateway callback, HTTPS from loop().
+bool askNeedPost = false;
+String askPendingQuestion;
+String askPendingChannelId;
+
 // Shared HTTP body reader (chunked or Content-Length). Used by Discord REST and DeepSeek.
 bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
                               String& outBody, unsigned long deadlineMs) {
@@ -1222,6 +1237,7 @@ bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
   if (chunked) {
     while (millis() < deadlineMs) {
       while (!client.available() && client.connected() && millis() < deadlineMs) {
+        pumpGateway();
         delay(5);
       }
       if (!client.available()) break;
@@ -1241,6 +1257,7 @@ bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
         } else if (!client.connected()) {
           break;
         } else {
+          pumpGateway();
           delay(1);
         }
       }
@@ -1255,6 +1272,7 @@ bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
         if ((int)outBody.length() >= contentLength || outBody.length() >= maxBody) break;
       }
       if (!client.connected() && !client.available()) break;
+      pumpGateway();
       delay(5);
     }
     return outBody.length() > 0;
@@ -1265,6 +1283,7 @@ bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
       if (outBody.length() >= maxBody) return true;
     }
     if (!client.connected() && !client.available()) break;
+    pumpGateway();
     delay(10);
   }
   return outBody.length() > 0;
@@ -1298,13 +1317,16 @@ bool askDeepSeek(const String& question, String& outReport) {
   user["content"] = q;
   String body;
   serializeJson(req, body);
+  Serial.println("[ASK] TLS connect api.deepseek.com");
   httpsClient.stop();
   httpsClient.setInsecure();
   httpsClient.setTimeout(25000);
   if (!httpsClient.connect("api.deepseek.com", 443)) {
     outReport = "DeepSeek connection failed.";
+    Serial.println("[ASK] TLS connect failed");
     return false;
   }
+  Serial.println("[ASK] POST /chat/completions");
   String request =
     "POST /chat/completions HTTP/1.1\r\n"
     "Host: api.deepseek.com\r\n"
@@ -1319,6 +1341,7 @@ bool askDeepSeek(const String& question, String& outReport) {
   httpsClient.print(request);
   unsigned long deadline = millis() + 30000UL;
   while (httpsClient.available() == 0) {
+    pumpGateway();
     if (millis() > deadline) {
       outReport = "DeepSeek timeout waiting for headers.";
       httpsClient.stop();
@@ -1400,6 +1423,22 @@ bool askDeepSeek(const String& question, String& outReport) {
   }
   outReport = "🧠 **DeepSeek:**\n" + truncateText(answer, 3600);
   return true;
+}
+void runAskFromLoop() {
+  if (!askNeedPost) return;
+  askNeedPost = false;
+  String report;
+  if (askDeepSeek(askPendingQuestion, report)) {
+    sendDiscordMessage(askPendingChannelId, report);
+    dashLastEvent = "Ask sent";
+    showTransient("DeepSeek", "Sent");
+  } else {
+    sendDiscordMessage(askPendingChannelId, report);
+    dashLastEvent = "Ask error";
+    showTransient("DeepSeek", "Error");
+  }
+  askPendingQuestion = "";
+  askPendingChannelId = "";
 }
 // ====== DISCORD COMMAND DISPATCH ======
 // Public commands first; anything else requires OWNER_ID_STR.
@@ -1565,19 +1604,22 @@ void handleCommand(const String& content, const String& authorId, const String& 
       sendDiscordMessage(channelId, "Usage: !ask <question>");
       return;
     }
+    if (askNeedPost) {
+      sendDiscordMessage(channelId, "DeepSeek is already answering. Try again in a moment.");
+      return;
+    }
     String question = cmd.substring(spaceIdx + 1);
     question.trim();
-    String report;
-    showTransient("DeepSeek", "Thinking...", "", 30000);
-    if (askDeepSeek(question, report)) {
-      sendDiscordMessage(channelId, report);
-      dashLastEvent = "Ask sent";
-      showTransient("DeepSeek", "Sent");
-    } else {
-      sendDiscordMessage(channelId, report);
-      dashLastEvent = "Ask error";
-      showTransient("DeepSeek", "Error");
+    if (question.length() == 0) {
+      sendDiscordMessage(channelId, "Usage: !ask <question>");
+      return;
     }
+    askPendingQuestion = question;
+    askPendingChannelId = channelId;
+    askNeedPost = true;
+    dashLastEvent = "Ask queued";
+    showTransient("DeepSeek", "Queued");
+    Serial.println("[ASK] queued (HTTPS from loop)");
     return;
   }
   if (cmd.startsWith("!display")) {
@@ -1781,6 +1823,7 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
 }
 // Auto Discord posts: 4-hour sysinfo; 06:00 / 12:00 / 18:00 Pacific indoor temp.
 void backgroundTasks() {
+  runAskFromLoop();
   unsigned long now = millis();
   // Every 4 hours: System Health Report
   if (now - lastSysInfoMillis >= SYSINFO_INTERVAL_MS || lastSysInfoMillis == 0) {
@@ -1862,14 +1905,7 @@ void setup() {
 }
 // Gateway pump, heartbeat, scheduled posts, OLED refresh/sleep. MCU never sleeps here.
 void loop() {
-  gatewayWS.loop();
-  if (heartbeatIntervalMs > 0 && gatewayConnected && identified) {
-    unsigned long now = millis();
-    if (now - lastHeartbeatMillis >= (unsigned long)heartbeatIntervalMs) {
-      lastHeartbeatMillis = now;
-      sendHeartbeat();
-    }
-  }
+  pumpGateway();
   backgroundTasks();
   updateDisplay();
   delay(5);

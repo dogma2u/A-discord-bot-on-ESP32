@@ -48,6 +48,7 @@ Sent to `TARGET_CHANNEL_ID` (no command needed):
 - JSON parse buffer: **12288** bytes
 - Discord post cap: **3600** characters
 - HTTPS on the ESP32 can take several seconds
+- `!ask` is queued off the Discord Gateway thread; heartbeats keep running while DeepSeek waits
 
 ---
 
