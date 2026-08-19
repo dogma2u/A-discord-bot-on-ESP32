@@ -2,20 +2,11 @@
 
 MiniMe is firmware for a **WeAct Studio ESP32-S3-N16R8** that runs a Discord bot on the chip. It joins Wi‑Fi and the Discord Gateway, reads sensors, drives GPIO from chat, and shows a live dashboard on a **128×128 SSD1327** OLED.
 
-This repo sketch uses **placeholders only**. Put real Wi‑Fi, tokens, API keys, and Discord IDs in a **local** copy of `MiniMe_Discord_Bot/MiniMe_Discord_Bot.ino`. Do not commit or push that copy.
-
 ![MiniMe ESP32-S3 breadboard prototype with SSD1327 OLED](docs/minime-breadboard.png)
 
 *Breadboard prototype: WeAct Studio ESP32-S3-N16R8, 128×128 SSD1327 (GND / VCC / SCL / SDA), and two discrete LEDs.*
 
-Current version: **0.4.1** (see `VERSION` and `CHANGELOG.md`).
-
-### What changed in 0.4.1
-
-- OLED user-stat block is **seven rows** (was five). Empty slots still show `---`.
-- Display sleep still **only blanks the SSD1327**. The ESP32 and Wi-Fi stay on so Discord commands and presence can wake the panel.
-- Sketch has **section comments** for config, display, user tracking, REST/APIs, commands, Gateway, and `setup`/`loop`.
-- Text is placed with U8g2 `drawStr(x, y)`. **`y` is the font baseline**, not `setCursor`. Header `y=7` is the top of the 128×128 panel.
+Current version: see `VERSION` and `CHANGELOG.md`.
 
 ---
 
@@ -25,26 +16,24 @@ Same list Discord shows for `!help`:
 
 **Public commands** (DMs, `TARGET_CHANNEL_ID`, or `TARGET_CHANNEL_ID1`):
 
-- `!weather <zip>` — US ZIP weather (OpenWeatherMap)
-- `!temp` — indoor DS18B20 temperature
-- `!sysinfo` — uptime, free heap (internal + 8MB PSRAM), Wi‑Fi RSSI, gateway
-- `!time` — bot local time (US Pacific, DST aware)
+- `!apod` — NASA Astronomy Picture of the Day
+- `!ask <question>` — DeepSeek text reply in chat
+- `!display <text>` — writes payload text on OLED rows 15–16 (not the `!display` word)
+- `!help` — this command list
+- `!iss` — International Space Station position
 - `!news` — space / high-tech headlines
 - `!physics` — latest arXiv physics papers
-- `!apod` — NASA Astronomy Picture of the Day
-- `!iss` — International Space Station position
-- `!ask <question>` — DeepSeek text reply in chat
-- `!help` — this command list
+- `!sysinfo` — uptime, free heap (internal + 8MB PSRAM), Wi‑Fi RSSI, gateway
+- `!temp` — indoor DS18B20 temperature
+- `!time` — bot local time (US Pacific, DST aware)
+- `!weather <zip>` — US ZIP weather (OpenWeatherMap)
 
 **Owner-only** (`OWNER_ID_STR`):
 
 - `!led on` / `!led off` — onboard RGB NeoPixel
+- `!servo <0-90>` — servo angle (updates the `Srv:` bar)
 - `!set1 on` / `!set1 off` — digital output pin 1
 - `!set2 on` / `!set2 off` — digital output pin 2
-- `!servo <0-90>` — servo angle
-- `!display <text>` — custom OLED overlay
-
-`!status` is **not** in this firmware.
 
 ### Automatic posts
 
@@ -53,38 +42,54 @@ Sent to `TARGET_CHANNEL_ID` (no command needed):
 - Every **4 hours:** system diagnostics
 - Daily at **6:00, 12:00, and 18:00** (Pacific): indoor temperature summary
 
+### `!ask` / DeepSeek
+
+- Request `max_tokens`: **900**
+- JSON parse buffer: **12288** bytes
+- Discord post cap: **3600** characters
+- HTTPS on the ESP32 can take several seconds
+
 ---
 
 ## OLED dashboard
 
-The display is a **128×128 SSD1327** grayscale OLED, driven with U8g2 (`U8G2_SSD1327_EA_W128128_F_HW_I2C`).
+The display is a **128×128 SSD1327** grayscale OLED, driven with U8g2 (`U8G2_SSD1327_WS_128X128_F_HW_I2C`). Do not use the EastRising `EA_W128128` constructor on this panel; it shifts the picture so the top of the buffer is not the top of the glass.
 
-| Area | What it shows |
-|---|---|
-| Header | `MiniMe`, `GW:good` / `GW:bad`, right-justified `HH:MM:SS` |
-| Sig | Wi‑Fi RSSI bar |
-| Heap | Free memory bar (internal SRAM + 8MB PSRAM) |
-| Temp | DS18B20, or `-- sensor --` if missing |
-| Up Time | days / hours / minutes |
-| Seven user rows | name, `On` / `Idle` / `DND` / `Off`, `Bot:N` (commands in the last 24 hours) |
+Font is **5×7** with 1px padding (**8px** per row). U8g2 `drawStr(x, y)` uses **`y` as the font baseline** (no `setCursor`). Header `y=7` is the top of the panel (pixels ~0–6).
 
-Empty slots show `---`. Names come from a startup REST member fetch (nick → global name → username). Presence updates from the Gateway. Command counts reset every 24 hours.
+| Row | Baseline y | What it shows |
+|---|---|---|
+| 0 | 7 | `MiniMe`, `GW:Good` / `GW:Bad`, right-justified `HH:MM:SS` |
+| 2 | 15 | `Sig:` Wi‑Fi RSSI bar |
+| 3 | 23 | `Heap:` free memory bar (internal SRAM + 8MB PSRAM) |
+| 4 | 31 | `Srv:` servo position bar, **0–90°** (boot commands **45°**, half fill) |
+| 5 | 39 | `Temp:` DS18B20, or `-- sensor --` if missing |
+| 6 | 47 | `Up Time:` days / hours / minutes |
+| 7–14 | 55 + row×8 … 111 | Eight user rows: name, `On` / `Idle` / `DND` / `Off`, `Bot:N` (commands in the last 24 hours) |
+| 15–16 | 119 / 127 | Command / action text, or `!display` payload. **Blank when idle** |
 
-**How text is placed:** there is no `setCursor`. U8g2 `drawStr(x, y)` uses **`y` as the font baseline** (bottom of the letters). The 5×7 header at `y=7` occupies about pixels 0–6 (top of the panel). User rows use the 4×6 font with baselines `y = 55 + row * 8` (55, 63, 71, 79, 87, 95, 103).
+Empty user slots show `---`. Names come from a startup REST member fetch (nick → global name → username), up to **eight** members. Presence updates from the Gateway. Command counts reset every 24 hours.
+
+Commands and gateway events **do not wipe** the dashboard. They write **rows 15 and 16** only, then those rows clear when the message expires.
+
+### `!display`
+
+- Public command.
+- Only the text after `!display` is shown (the command word is not drawn).
+- Cap **50** characters: **25** on row 15, **25** on row 16.
+- Stays **6 seconds**. A new `!display` overwrites and restarts the 6-second timer.
 
 ### Display sleep
 
 After **10 minutes** with no real events, the panel turns **off** (`u8g2.setPowerSave(1)`). That is OLED power-save only. The microcontroller, Wi-Fi, and Discord Gateway keep running.
 
-These **do not** reset the timer: signal bar, clock, heap, uptime, and the 2-second dashboard refresh.
+These **do not** reset the timer: signal / heap / servo bars, clock, uptime, and the 2-second dashboard refresh.
 
-These **wake** the panel and restart the 10-minute timer: Discord commands, presence status changes, gateway connect/disconnect, `!display`, scheduled reports, and other transient status messages.
+These **wake** the panel and restart the 10-minute timer: Discord commands, presence status changes, gateway connect/disconnect, `!display`, scheduled reports, and other status lines on rows 15–16.
 
 ---
 
-## Fill in these values (local sketch only)
-
-Open `MiniMe_Discord_Bot/MiniMe_Discord_Bot.ino` and replace the placeholders. The GitHub file should stay like this:
+## Fill in these values
 
 ```cpp
 const char* WIFI_SSID     = "ssid";
@@ -107,13 +112,13 @@ const String TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";
 | `WEATHER_API_KEY` | OpenWeatherMap `!weather` |
 | `NASA_API_KEY` | NASA APOD for `!apod` |
 | `DEEPSEEK_API_KEY` | DeepSeek for `!ask` |
-| `BOT_GUILD_ID` | Guild used at boot to load up to 7 members (numeric snowflake) |
-| `OWNER_ID_STR` | Who can run hardware commands |
+| `BOT_GUILD_ID` | Guild used at boot to load up to 8 members (numeric snowflake) |
+| `OWNER_ID_STR` | Who can run LED / set1 / set2 / servo |
 | `TARGET_CHANNEL_ID` | Commands + auto sysinfo / scheduled summaries |
 | `TARGET_CHANNEL_ID1` | Second channel where commands are allowed |
 | `TEMP_CHANNEL_ID_STR` | Reserved / unused by commands |
 
-IDs are **digits only**. Paste them as C strings, for example `"123456789012345678"`. Never put real IDs in a commit.
+IDs are **digits only**. Paste them as C strings, for example `"123456789012345678"`.
 
 If `BOT_GUILD_ID` is still the placeholder, boot tries to resolve the guild from `TARGET_CHANNEL_ID`.
 
@@ -152,7 +157,7 @@ This is **your Discord user ID**, not the bot’s ID.
 
 1. Discord: **User Settings** → **Advanced** → enable **Developer Mode**.
 2. Right-click **your own avatar** → **Copy User ID**.
-3. Paste that into `OWNER_ID_STR` in the **local** sketch only.
+3. Paste that into `OWNER_ID_STR`.
 
 If owner commands never work, you copied a channel ID or the application ID by mistake.
 
@@ -194,7 +199,7 @@ These are public. Digests are short so the ESP32 stays within memory limits.
 ### How to get a NASA key (`NASA_API_KEY`)
 
 1. Open [api.nasa.gov](https://api.nasa.gov/) and generate a free key (email signup).
-2. Paste it into `NASA_API_KEY` locally.
+2. Paste it into `NASA_API_KEY`.
 3. NASA’s `DEMO_KEY` works for light testing but is shared and rate-limited. Use your own key if `!apod` starts failing.
 
 ---
@@ -204,9 +209,9 @@ These are public. Digests are short so the ESP32 stays within memory limits.
 1. Create an account at [DeepSeek Platform](https://platform.deepseek.com/).
 2. Open [API Keys](https://platform.deepseek.com/api_keys).
 3. Create a key and copy it.
-4. Paste it into `DEEPSEEK_API_KEY` in your **local** sketch only.
+4. Paste it into `DEEPSEEK_API_KEY`.
 5. In Discord: `!ask what is quantum entanglement?`
-6. Replies are short text in the channel. HTTPS on the ESP32 can take several seconds.
+6. Replies can be longer now (`max_tokens` 900, post cap 3600 characters). HTTPS on the ESP32 can take several seconds.
 
 ---
 
@@ -243,8 +248,8 @@ OLED module labels: **GND, VCC, SCL, SDA**. The panel is **128×128**. Change pi
    - DallasTemperature
    - Adafruit NeoPixel
    - NTPClient
-5. Open **your local keyed copy** of `MiniMe_Discord_Bot.ino` (not a OneDrive duplicate unless that is the file you intend).
-6. Fill in Wi‑Fi, token, keys, and IDs **locally**. Leave the GitHub sketch as placeholders.
+5. Open `MiniMe_Discord_Bot/MiniMe_Discord_Bot.ino`.
+6. Fill in Wi‑Fi, token, keys, and IDs.
 7. Upload. Serial monitor **115200**: look for PSRAM size, `[GW] CONNECTED`, and `[GW] IDENTIFY sent`.
 8. In Discord, try `!help`.
 

@@ -1,26 +1,26 @@
 /*
  MiniMe Bot Commands
  Public Commands:
-• !weather <zip> — Fetches the weather report for a US ZIP code.
-• !temp — Reads the current indoor temperature sensor.
-• !sysinfo — Displays system diagnostics (uptime, heap, RSSI, etc.).
-• !time — Displays the current bot time.
+• !apod — NASA Astronomy Picture of the Day.
+• !ask <question> — Asks DeepSeek (text AI reply in chat).
+• !display <text> — Writes custom text to the OLED screen.
+• !help — Shows this command list.
+• !iss — Current International Space Station position.
 • !news — Space and high-tech science headlines.
 • !physics — Latest arXiv physics papers.
-• !apod — NASA Astronomy Picture of the Day.
-• !iss — Current International Space Station position.
-• !ask <question> — Asks DeepSeek (text AI reply in chat).
-• !help — Shows this command list.
+• !sysinfo — Displays system diagnostics (uptime, heap, RSSI, etc.).
+• !temp — Reads the current indoor temperature sensor.
+• !time — Displays the current bot time.
+• !weather <zip> — Fetches the weather report for a US ZIP code.
  Owner-Only Commands:
 • !led on / !led off — Controls the RGB NeoPixel LED.
+• !servo <0-90> — Moves the servo motor to a specific angle.
 • !set1 on / !set1 off — Controls digital output pin 1.
 • !set2 on / !set2 off — Controls digital output pin 2.
-• !servo <0-90> — Moves the servo motor to a specific angle.
-• !display <text> — Writes custom text to the OLED screen.
 
  Sketch map (this file, top to bottom):
  1) Config, pins, NTP / Pacific DST
- 2) Discord Gateway state + 7-user presence / 24h command counts
+ 2) Discord Gateway state + 8-user presence / 24h command counts
  3) SSD1327 dashboard, sleep, overlays (U8g2 drawStr; y is font baseline)
  4) GPIO, servo, DS18B20, NeoPixel
  5) Discord REST, public HTTP APIs, command handler
@@ -52,7 +52,7 @@ const char* DEEPSEEK_API_KEY = "DEEPSEEK_API_KEY";
 // Guild to fetch members from at startup
 #define BOT_GUILD_ID "GUILD_ID"
 // ====== OWNER AND CHANNEL IDS ======
-// OWNER_ID_STR: who may run GPIO / servo / !display.
+// OWNER_ID_STR: who may run GPIO / servo.
 // TARGET_CHANNEL_ID: commands + auto sysinfo / 6-12-18 temp posts.
 // TARGET_CHANNEL_ID1: second channel that may run commands.
 const String OWNER_ID_STR        = "OWNER_ID_STR";
@@ -137,18 +137,22 @@ unsigned long lastHeartbeatMillis = 0;
 int lastSeq               = 0;
 // ====== DISPLAY STATE ======
 // Full-buffer U8g2 on SSD1327. No setCursor: drawStr(x, y) uses y as the font baseline.
-U8G2_SSD1327_EA_W128128_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+// Waveshare-style 1.5" 128x128 SSD1327. EA_W128128 shifts the picture down so
+// firmware y=0 is not the top of the glass, and y=119/127 (lines 15-16) fall off the bottom.
+U8G2_SSD1327_WS_128X128_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 void noteDisplayActivity();
+void drawDashboard();
 
 // Dashboard live data
 float dashTempC = -999.0f;
 float dashTempF = -999.0f;
+int lastServoDeg = 45;
 String dashLastCmd   = "none";
 String dashLastEvent = "Starting...";
 unsigned long dashLastCmdMillis = 0;
 
 // ---- User usage + presence tracking (for dashboard) ----
-// Seven OLED rows: name, On/Idle/DND/Off, Bot:N (commands in the last 24h).
+// Eight OLED rows: name, On/Idle/DND/Off, Bot:N (commands in the last 24h).
 // Slots fill from a startup REST member list; presence comes from the Gateway.
 struct TrackedUser {
   String userId;
@@ -158,7 +162,7 @@ struct TrackedUser {
   bool active;
 };
 
-static const uint8_t MAX_TRACKED_USERS = 7;
+static const uint8_t MAX_TRACKED_USERS = 8;
 TrackedUser trackedUsers[MAX_TRACKED_USERS];
 String cachedGuildId = "";
 
@@ -284,7 +288,7 @@ void applyPresencesArray(JsonArray presences) {
   }
 }
 
-// Gateway OP 8: ask Discord for current presence of the seven tracked user IDs.
+// Gateway OP 8: ask Discord for current presence of the eight tracked user IDs.
 void requestTrackedUserPresences() {
   if (cachedGuildId.length() < 16) return;
   bool any = false;
@@ -341,7 +345,7 @@ void handlePresenceUpdate(JsonObject d) {
   }
 }
 
-// Transient overlay: three lines that replace the dashboard for a few seconds (commands, GW, !display).
+// Status on OLED rows 15-16 only. Dashboard stays up; these two lines show commands / !display.
 String transientLine1 = "";
 String transientLine2 = "";
 String transientLine3 = "";
@@ -394,13 +398,14 @@ void updateDisplaySleep() {
   }
 }
 
-// Queue a 3-line overlay (replaces dashboard until durationMs).
+// Queue a 2-line status (OLED rows 15-16). Dashboard is not replaced.
 void showTransient(const String& line1, const String& line2 = "", const String& line3 = "", unsigned long durationMs = 3000) {
   noteDisplayActivity();
   transientLine1 = line1;
   transientLine2 = line2;
   transientLine3 = line3;
   transientUntilMs = millis() + durationMs;
+  lastDashMillis = 0; // loop/updateDisplay paints; do not draw here (stack + NTP inside Gateway)
 }
 
 // Draw the persistent dashboard (128x128 SSD1327)
@@ -410,18 +415,21 @@ void showTransient(const String& line1, const String& line2 = "", const String& 
 // Grid: 16 rows x 18 chars on 128x128
 // Row baselines (y = row*8, glyph baseline at y+7):
 //   Row 0  y=7   Header: MiniMe + GW:good/bad + right-justified time
-//   Row 1  y=8   divider line
-//   Row 2  y=23  Sig bar
-//   Row 3  y=31  Heap bar
-//   Row 4  y=39  Temp: xx.xF / xx.xC
-//   Row 5  y=47  Up Time: XdXhXm
-//   Row 6  y=55  User1: Name <On|Idle|DND|Off> Count
-//   Row 7  y=63  User2: Name <On|Idle|DND|Off> Count
-//   Row 8  y=71  User3: Name <On|Idle|DND|Off> Count
-//   Row 9  y=79  User4: Name <On|Idle|DND|Off> Count
-//   Row 10 y=87  User5: Name <On|Idle|DND|Off> Count
-//   Row 11 y=95  User6: Name <On|Idle|DND|Off> Count
-//   Row 12 y=103 User7: Name <On|Idle|DND|Off> Count
+//   Row 2  y=15  Sig bar
+//   Row 3  y=23  Heap bar
+//   Row 4  y=31  Srv bar (0-90 deg)
+//   Row 5  y=39  Temp: xx.xF / xx.xC
+//   Row 6  y=47  Up Time: XdXhXm
+//   Row 7  y=55  User1
+//   Row 8  y=63  User2
+//   Row 9  y=71  User3
+//   Row 10 y=79  User4
+//   Row 11 y=87  User5
+//   Row 12 y=95  User6
+//   Row 13 y=103 User7
+//   Row 14 y=111 User8
+//   Row 15 y=119 command / !display text (blank when idle)
+//   Row 16 y=127 command / !display text (blank when idle)
 void drawDashboard() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_5x7_tf);
@@ -429,16 +437,13 @@ void drawDashboard() {
   // ---- Row 0: Header (MiniMe + GW + right-justified time) ----
   updateLocalTime();
   String t = timeClient.getFormattedTime(); // HH:MM:SS
-  String gwHeader = gatewayConnected ? "GW:good" : "GW:bad";
+  String gwHeader = gatewayConnected ? "GW:Good" : "GW:Bad";
   u8g2.drawStr(0, 7, "MiniMe");
   u8g2.drawStr(42, 7, gwHeader.c_str());
   // True right-justify using actual rendered width.
   int timeX = 128 - u8g2.getStrWidth(t.c_str());
   if (timeX < 0) timeX = 0;
   u8g2.drawStr(timeX, 7, t.c_str());
-
-  // divider
-  u8g2.drawHLine(0, 9, 128);
 
   // ---- Rows 2-3: Signal + Heap bars ----
   long rssi = WiFi.RSSI();
@@ -450,9 +455,9 @@ void drawDashboard() {
   if (rssi >= -40) sigBarW = 79;
   else if (rssi <= -100) sigBarW = 0;
   else sigBarW = (int)((rssi + 100) * 79 / 60);
-  u8g2.drawStr(0, 23, "Sig:");
-  u8g2.drawFrame(25, 16, 103, 8);
-  if (sigBarW > 0) u8g2.drawBox(26, 17, sigBarW, 6);
+  u8g2.drawStr(0, 15, "Sig:");
+  u8g2.drawFrame(25, 8, 103, 8);
+  if (sigBarW > 0) u8g2.drawBox(26, 9, sigBarW, 6);
 
   // Heap bar (row 3) — internal SRAM + this board's 8MB PSRAM, original 8px height
   uint32_t psramSize = ESP.getPsramSize();
@@ -467,11 +472,20 @@ void drawDashboard() {
     if (heapBarW < 0) heapBarW = 0;
     if (heapBarW > 79) heapBarW = 79;
   }
-  u8g2.drawStr(0, 31, "Heap:");
-  u8g2.drawFrame(25, 24, 103, 8);
-  if (heapBarW > 0) u8g2.drawBox(26, 25, heapBarW, 6);
+  u8g2.drawStr(0, 23, "Heap:");
+  u8g2.drawFrame(25, 16, 103, 8);
+  if (heapBarW > 0) u8g2.drawBox(26, 17, heapBarW, 6);
 
-  // ---- Row 4: Temp ----
+  // Servo bar (row 4) — last !servo angle 0-90, fill matches inner frame (101px)
+  const int srvInnerW = 101;
+  int srvBarW = (lastServoDeg * srvInnerW) / 90;
+  if (srvBarW < 0) srvBarW = 0;
+  if (srvBarW > srvInnerW) srvBarW = srvInnerW;
+  u8g2.drawStr(0, 31, "Srv:");
+  u8g2.drawFrame(25, 24, 103, 8);
+  if (srvBarW > 0) u8g2.drawBox(26, 25, srvBarW, 6);
+
+  // ---- Row 5: Temp ----
   u8g2.drawStr(0, 39, "Temp:");
   if (dashTempC > -998.0f) {
     char buf[28];
@@ -481,7 +495,7 @@ void drawDashboard() {
     u8g2.drawStr(31, 39, "-- sensor --");
   }
 
-  // ---- Row 5: Up Time ----
+  // ---- Row 6: Up Time ----
   unsigned long uptimeSec = millis() / 1000;
   unsigned long d = uptimeSec / 86400;
   unsigned long h = (uptimeSec % 86400) / 3600;
@@ -490,9 +504,9 @@ void drawDashboard() {
   snprintf(upBuf, sizeof(upBuf), "Up Time:%lud%luh%lum", d, h, m);
   u8g2.drawStr(0, 47, upBuf);
 
-  // ---- Rows 6-12: seven user stats (4x6 font) ----
+  // ---- Rows 7-14: eight user stats (5x7 + 1px pad = 8px rows) ----
   // Name left, status after the longest name, Bot:N right-justified. Empty slots show ---.
-  u8g2.setFont(u8g2_font_4x6_tf);
+  u8g2.setFont(u8g2_font_5x7_tf);
   const int gapPx = 4;
   const int statusW = u8g2.getStrWidth("Idle");
   const int botReserveW = u8g2.getStrWidth("Bot:999");
@@ -516,7 +530,7 @@ void drawDashboard() {
   int statusX = longestNamePx + gapPx;
 
   for (uint8_t row = 0; row < MAX_TRACKED_USERS; row++) {
-    uint8_t y = 55 + (row * 8); // baseline: 55, 63, 71, 79, 87, 95, 103
+    uint8_t y = 55 + (row * 8); // baseline: 55, 63, 71, 79, 87, 95, 103, 111
     String name = names[row];
     while (name.length() > 1 && u8g2.getStrWidth(name.c_str()) > longestNamePx) {
       name.remove(name.length() - 1);
@@ -533,27 +547,38 @@ void drawDashboard() {
     u8g2.drawStr(botX, y, botStr.c_str());
   }
 
+  u8g2.setFont(u8g2_font_5x7_tf);
+  String row15 = "";
+  String row16 = "";
+  if (millis() < transientUntilMs) {
+    row15 = transientLine1;
+    row16 = transientLine2;
+    if (transientLine3.length()) {
+      if (row16.length()) row16 += " ";
+      row16 += transientLine3;
+    }
+  }
+  u8g2.drawStr(0, 119, row15.c_str());
+  u8g2.drawStr(0, 127, row16.c_str());
+
   u8g2.sendBuffer();
 }
 
-// Draw transient overlay (3-line status message)
+// Draw status on rows 15-16 without wiping the dashboard.
 void drawTransient() {
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_6x10_tf);
-  u8g2.drawStr(0, 16, transientLine1.c_str());
-  if (transientLine2.length()) u8g2.drawStr(0, 32, transientLine2.c_str());
-  if (transientLine3.length()) u8g2.drawStr(0, 48, transientLine3.c_str());
-  u8g2.sendBuffer();
+  lastDashMillis = 0;
 }
 
-// Called from loop: sleep check, then overlay or 2s dashboard refresh.
+// Called from loop: sleep check, then 2s dashboard refresh (rows 15-16 show events while active).
 void updateDisplay() {
   updateDisplaySleep();
   if (displayAsleep) return;
   unsigned long now = millis();
-  if (now < transientUntilMs) {
-    drawTransient();
-  } else if (now - lastDashMillis >= DASH_REFRESH_MS) {
+  if (transientUntilMs != 0 && now >= transientUntilMs) {
+    transientUntilMs = 0;
+    lastDashMillis = 0;
+  }
+  if (lastDashMillis == 0 || now - lastDashMillis >= DASH_REFRESH_MS) {
     lastDashMillis = now;
     // Refresh temp reading for dashboard
     float c, f;
@@ -568,7 +593,6 @@ void updateDisplay() {
 // Legacy helper kept for boot/connect messages that need an immediate paint
 void drawStatus(const String& line1, const String& line2 = "", const String& line3 = "") {
   showTransient(line1, line2, line3, 3000);
-  drawTransient();
 }
 
 // ====== SERVO (LEDC 50Hz PWM, owner !servo 0-90) ======
@@ -595,13 +619,14 @@ void setupServo() {
 void setServoAngle(int angleDeg) {
   if (angleDeg < 0) angleDeg = 0;
   if (angleDeg > 90) angleDeg = 90;
+  lastServoDeg = angleDeg;
   int pulseUs = 500 + (1500 * angleDeg / 90);
   uint32_t max_duty = (1 << 14) - 1;
   uint32_t duty = (pulseUs * max_duty) / 20000;
   ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
   ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
-// Boot: NeoPixel, set1/set2 outputs, servo parked at 0 degrees.
+// Boot: NeoPixel, set1/set2 outputs, servo parked at 45 degrees.
 void setupPins() {
   pinMode(RGB_LED_PIN, OUTPUT);
   digitalWrite(RGB_LED_PIN, LOW);
@@ -612,7 +637,7 @@ void setupPins() {
   digitalWrite(PIN_SET1, LOW);
   digitalWrite(PIN_SET2, LOW);
   setupServo();
-  setServoAngle(0);
+  setServoAngle(45);
 }
 // DS18B20 read for dashboard, !temp, and scheduled summaries.
 bool readTemperature(float &tempC, float &tempF) {
@@ -870,7 +895,7 @@ String resolveGuildIdAtStartup() {
   return gid;
 }
 
-// Boot: load up to seven non-bot members for the OLED name rows.
+// Boot: load up to eight non-bot members for the OLED name rows.
 bool fetchGuildMembersAtStartup() {
   String guildId = resolveGuildIdAtStartup();
   if (!discordIdLooksValid(guildId)) {
@@ -1201,7 +1226,7 @@ bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
   }
   return outBody.length() > 0;
 }
-// !ask — DeepSeek chat completion (short reply for ESP32 memory/time limits).
+// !ask — DeepSeek chat completion (max_tokens 900; Discord post capped at 3600 chars).
 bool askDeepSeek(const String& question, String& outReport) {
   if (DEEPSEEK_API_KEY == nullptr || strlen(DEEPSEEK_API_KEY) == 0) {
     outReport = "DeepSeek API key not set. Add DEEPSEEK_API_KEY in the sketch.";
@@ -1218,13 +1243,13 @@ bool askDeepSeek(const String& question, String& outReport) {
   }
   StaticJsonDocument<1536> req;
   req["model"] = "deepseek-chat";
-  req["max_tokens"] = 220;
+  req["max_tokens"] = 900;
   req["temperature"] = 0.7;
   req["stream"] = false;
   JsonArray messages = req.createNestedArray("messages");
   JsonObject sys = messages.createNestedObject();
   sys["role"] = "system";
-  sys["content"] = "You are MiniMe on an ESP32 Discord bot. Answer clearly and briefly for science, tech, and physics. Keep replies under 200 words.";
+  sys["content"] = "You are MiniMe on an ESP32 Discord bot. Answer clearly for science, tech, and physics. Use up to 900 tokens. Keep the answer within 3600 characters so it fits the Discord post.";
   JsonObject user = messages.createNestedObject();
   user["role"] = "user";
   user["content"] = q;
@@ -1292,7 +1317,7 @@ bool askDeepSeek(const String& question, String& outReport) {
   StaticJsonDocument<128> filter;
   filter["choices"][0]["message"]["content"] = true;
   filter["error"]["message"] = true;
-  StaticJsonDocument<6144> doc;
+  StaticJsonDocument<12288> doc;
   DeserializationError err = deserializeJson(doc, respBody, DeserializationOption::Filter(filter));
   if (err) {
     outReport = "DeepSeek JSON parse error (" + String(err.c_str()) + ").";
@@ -1320,7 +1345,7 @@ bool askDeepSeek(const String& question, String& outReport) {
           }
           if (c == '"') break;
           extracted += c;
-          if (extracted.length() > 1800) break;
+          if (extracted.length() > 3600) break;
         }
         answer = collapseWhitespace(extracted);
       }
@@ -1330,7 +1355,7 @@ bool askDeepSeek(const String& question, String& outReport) {
     outReport = "DeepSeek returned an empty answer. " + truncateText(statusLine, 60);
     return false;
   }
-  outReport = "🧠 **DeepSeek:**\n" + truncateText(answer, 1800);
+  outReport = "🧠 **DeepSeek:**\n" + truncateText(answer, 3600);
   return true;
 }
 // ====== DISCORD COMMAND DISPATCH ======
@@ -1358,22 +1383,22 @@ void handleCommand(const String& content, const String& authorId, const String& 
     String helpMsg =
       "🤖 **MiniMe Bot Commands**\n\n"
       "**👤 Public Commands:**\n"
-      "• `!weather <zip>` — Fetches the weather report for a US ZIP code.\n"
-      "• `!temp` — Reads the current indoor temperature sensor.\n"
-      "• `!sysinfo` — Displays system diagnostics (uptime, heap, RSSI, etc.).\n"
-      "• `!time` — Displays the current bot time.\n"
+      "• `!apod` — NASA Astronomy Picture of the Day.\n"
+      "• `!ask <question>` — Asks DeepSeek (text AI reply in chat).\n"
+      "• `!display <text>` — Writes custom text to the OLED screen.\n"
+      "• `!help` — Shows this command list.\n"
+      "• `!iss` — Current International Space Station position.\n"
       "• `!news` — Space and high-tech science headlines.\n"
       "• `!physics` — Latest arXiv physics papers.\n"
-      "• `!apod` — NASA Astronomy Picture of the Day.\n"
-      "• `!iss` — Current International Space Station position.\n"
-      "• `!ask <question>` — Asks DeepSeek (text AI reply in chat).\n"
-      "• `!help` — Shows this command list.\n\n"
+      "• `!sysinfo` — Displays system diagnostics (uptime, heap, RSSI, etc.).\n"
+      "• `!temp` — Reads the current indoor temperature sensor.\n"
+      "• `!time` — Displays the current bot time.\n"
+      "• `!weather <zip>` — Fetches the weather report for a US ZIP code.\n\n"
       "**👑 Owner-Only Commands:**\n"
       "• `!led on` / `!led off` — Controls the RGB NeoPixel LED.\n"
-      "• `!set1 on` / `!set1 off` — Controls digital output pin 1.\n"
-      "• `!set2 on` / `!set2 off` — Controls digital output pin 2.\n"
       "• `!servo <0-90>` — Moves the servo motor to a specific angle.\n"
-      "• `!display <text>` — Writes custom text to the OLED screen.";
+      "• `!set1 on` / `!set1 off` — Controls digital output pin 1.\n"
+      "• `!set2 on` / `!set2 off` — Controls digital output pin 2.";
     sendDiscordMessage(channelId, helpMsg);
     dashLastEvent = "Help sent";
     showTransient("Help", "Command Sent");
@@ -1512,7 +1537,23 @@ void handleCommand(const String& content, const String& authorId, const String& 
     }
     return;
   }
-  // Owner-only hardware: LED, set1/set2, servo, !display overlay.
+  if (cmd.startsWith("!display")) {
+    int spaceIdx = cmd.indexOf(' ');
+    if (spaceIdx < 0) {
+      sendDiscordMessage(channelId, "Usage: !display <text>");
+      return;
+    }
+    String text = cmd.substring(spaceIdx + 1);
+    text.trim();
+    if (text.length() > 50) text = text.substring(0, 50);
+    String line15 = text.substring(0, text.length() > 25 ? 25 : text.length());
+    String line16 = text.length() > 25 ? text.substring(25) : "";
+    dashLastEvent = text.length() > 14 ? text.substring(0, 14) : text;
+    showTransient(line15, line16, "", 6000);
+    sendDiscordMessage(channelId, "Display updated.");
+    return;
+  }
+  // Owner-only hardware: LED, set1/set2, servo.
   if (!isOwner(authorId)) {
     if (!isDM) {
       sendDiscordMessage(channelId, "You are not allowed to use this command.");
@@ -1587,19 +1628,6 @@ void handleCommand(const String& content, const String& authorId, const String& 
     sendDiscordMessage(channelId, msg);
     dashLastEvent = "Servo " + String(angle) + "deg";
     showTransient("Servo", String(angle) + " deg");
-    return;
-  }
-  if (cmd.startsWith("!display")) {
-    int spaceIdx = cmd.indexOf(' ');
-    if (spaceIdx < 0) {
-      sendDiscordMessage(channelId, "Usage: !display <text>");
-      return;
-    }
-    String text = cmd.substring(spaceIdx + 1);
-    text.trim();
-    dashLastEvent = text.length() > 14 ? text.substring(0, 14) : text;
-    showTransient("Display:", text, "", 10000);
-    sendDiscordMessage(channelId, "Display updated.");
     return;
   }
 }
@@ -1784,7 +1812,10 @@ void setup() {
   }
   delay(1200);
   connectGateway();
+  setServoAngle(45);
+  lastDashMillis = 0;
   drawStatus("Ready", "Idle presence");
+  drawDashboard();
 }
 // Gateway pump, heartbeat, scheduled posts, OLED refresh/sleep. MCU never sleeps here.
 void loop() {
