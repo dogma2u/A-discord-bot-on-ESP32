@@ -164,7 +164,8 @@ struct TrackedUser {
 
 static const uint8_t MAX_TRACKED_USERS = 8;
 TrackedUser trackedUsers[MAX_TRACKED_USERS];
-String cachedGuildId = "";
+String cachedGuildIds[3];
+uint8_t cachedGuildCount = 0;
 
 unsigned long usesWindowStartMillis = 0;
 const unsigned long USES_WINDOW_MS = 86400UL * 1000UL; // 24 hours
@@ -288,9 +289,9 @@ void applyPresencesArray(JsonArray presences) {
   }
 }
 
-// Gateway OP 8: ask Discord for current presence of the eight tracked user IDs.
+// Gateway OP 8: ask Discord for current presence of the eight tracked user IDs (each cached guild).
 void requestTrackedUserPresences() {
-  if (cachedGuildId.length() < 16) return;
+  if (cachedGuildCount == 0) return;
   bool any = false;
   for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
     if (trackedUsers[i].active && trackedUsers[i].userId.length()) {
@@ -300,22 +301,26 @@ void requestTrackedUserPresences() {
   }
   if (!any) return;
 
-  StaticJsonDocument<768> doc;
-  doc["op"] = 8;
-  JsonObject d = doc.createNestedObject("d");
-  d["guild_id"] = cachedGuildId;
-  d["limit"] = 0;
-  d["presences"] = true;
-  JsonArray ids = d.createNestedArray("user_ids");
-  for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
-    if (trackedUsers[i].active && trackedUsers[i].userId.length()) {
-      ids.add(trackedUsers[i].userId);
+  for (uint8_t g = 0; g < cachedGuildCount; g++) {
+    if (cachedGuildIds[g].length() < 16) continue;
+    StaticJsonDocument<768> doc;
+    doc["op"] = 8;
+    JsonObject d = doc.createNestedObject("d");
+    d["guild_id"] = cachedGuildIds[g];
+    d["limit"] = 0;
+    d["presences"] = true;
+    JsonArray ids = d.createNestedArray("user_ids");
+    for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
+      if (trackedUsers[i].active && trackedUsers[i].userId.length()) {
+        ids.add(trackedUsers[i].userId);
+      }
     }
+    String payload;
+    serializeJson(doc, payload);
+    gatewayWS.sendTXT(payload);
+    Serial.print("[GW] Request Guild Members (presences) sent for ");
+    Serial.println(cachedGuildIds[g]);
   }
-  String payload;
-  serializeJson(doc, payload);
-  gatewayWS.sendTXT(payload);
-  Serial.println("[GW] Request Guild Members (presences) sent");
 }
 
 // Live PRESENCE_UPDATE: refresh name/status; may occupy a free dashboard slot.
@@ -855,19 +860,12 @@ bool discordRestGet(const String& path, String& outBody, String& outStatus) {
   return ok;
 }
 
-// Use BOT_GUILD_ID if valid; otherwise look up guild from TARGET_CHANNEL_ID.
-String resolveGuildIdAtStartup() {
-  String guildId = String(BOT_GUILD_ID);
-  guildId.trim();
-  if (discordIdLooksValid(guildId)) return guildId;
-
-  if (!discordIdLooksValid(TARGET_CHANNEL_ID)) {
-    Serial.println("[MEMBERS] no valid BOT_GUILD_ID or TARGET_CHANNEL_ID");
-    return "";
-  }
+// Look up a channel's guild id via REST.
+String guildIdFromChannel(const String& channelId) {
+  if (!discordIdLooksValid(channelId)) return "";
 
   String body, status;
-  if (!discordRestGet("/api/v10/channels/" + TARGET_CHANNEL_ID, body, status)) {
+  if (!discordRestGet("/api/v10/channels/" + channelId, body, status)) {
     Serial.print("[MEMBERS] channel lookup failed: ");
     Serial.println(status);
     return "";
@@ -895,14 +893,20 @@ String resolveGuildIdAtStartup() {
   return gid;
 }
 
-// Boot: load up to eight non-bot members for the OLED name rows.
-bool fetchGuildMembersAtStartup() {
-  String guildId = resolveGuildIdAtStartup();
-  if (!discordIdLooksValid(guildId)) {
-    Serial.println("[MEMBERS] guild id missing/invalid");
-    return false;
+void rememberGuildId(const String& gid) {
+  String id = gid;
+  id.trim();
+  if (!discordIdLooksValid(id)) return;
+  for (uint8_t i = 0; i < cachedGuildCount; i++) {
+    if (cachedGuildIds[i] == id) return;
   }
-  cachedGuildId = guildId;
+  if (cachedGuildCount >= 3) return;
+  cachedGuildIds[cachedGuildCount++] = id;
+}
+
+// Append non-bot members from one guild into free OLED slots (skip users already loaded).
+bool appendMembersFromGuild(const String& guildId, uint8_t maxToAdd) {
+  if (!discordIdLooksValid(guildId)) return false;
 
   String body, status;
   String path = "/api/v10/guilds/" + guildId + "/members?limit=200";
@@ -944,16 +948,21 @@ bool fetchGuildMembersAtStartup() {
     return false;
   }
 
-  initTrackedUsers();
-  uint8_t slot = 0;
+  uint8_t added = 0;
   for (JsonObject member : members) {
-    if (slot >= MAX_TRACKED_USERS) break;
+    if (added >= maxToAdd) break;
+    uint8_t slot = 255;
+    for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
+      if (!trackedUsers[i].active) { slot = i; break; }
+    }
+    if (slot == 255) break;
     if (member["user"]["bot"] == true) continue;
     String uid = member["user"]["id"] | "";
     String name = member["nick"] | "";
     if (name.length() == 0) name = member["user"]["global_name"] | "";
     if (name.length() == 0) name = member["user"]["username"] | "";
     if (uid.length() == 0 || name.length() == 0) continue;
+    if (findUserIndex(uid) >= 0) continue;
     trackedUsers[slot].active = true;
     trackedUsers[slot].userId = uid;
     trackedUsers[slot].userName = name;
@@ -963,12 +972,43 @@ bool fetchGuildMembersAtStartup() {
     Serial.print(slot);
     Serial.print(": ");
     Serial.println(name);
-    slot++;
+    added++;
   }
 
+  Serial.print("[MEMBERS] added from guild: ");
+  Serial.println(added);
+  return added > 0;
+}
+
+// Boot: load members from BOT_GUILD_ID and both command-channel guilds (two servers).
+bool fetchGuildMembersAtStartup() {
+  initTrackedUsers();
+  cachedGuildCount = 0;
+  rememberGuildId(String(BOT_GUILD_ID));
+  rememberGuildId(guildIdFromChannel(TARGET_CHANNEL_ID));
+  rememberGuildId(guildIdFromChannel(String(TARGET_CHANNEL_ID1)));
+
+  if (cachedGuildCount == 0) {
+    Serial.println("[MEMBERS] no valid BOT_GUILD_ID or channel guilds");
+    return false;
+  }
+
+  bool any = false;
+  uint8_t share = (cachedGuildCount > 0) ? (MAX_TRACKED_USERS / cachedGuildCount) : MAX_TRACKED_USERS;
+  if (share < 1) share = 1;
+  for (uint8_t g = 0; g < cachedGuildCount; g++) {
+    if (appendMembersFromGuild(cachedGuildIds[g], share)) any = true;
+  }
+  for (uint8_t g = 0; g < cachedGuildCount; g++) {
+    if (appendMembersFromGuild(cachedGuildIds[g], MAX_TRACKED_USERS)) any = true;
+  }
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
+    if (trackedUsers[i].active) n++;
+  }
   Serial.print("[MEMBERS] loaded users: ");
-  Serial.println(slot);
-  return slot > 0;
+  Serial.println(n);
+  return any;
 }
 
 // ====== SCIENCE / AI HTTP HELPERS ======

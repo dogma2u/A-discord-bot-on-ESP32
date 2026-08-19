@@ -112,7 +112,7 @@ const String TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";
 | `WEATHER_API_KEY` | OpenWeatherMap `!weather` |
 | `NASA_API_KEY` | NASA APOD for `!apod` |
 | `DEEPSEEK_API_KEY` | DeepSeek for `!ask` |
-| `BOT_GUILD_ID` | Guild used at boot to load up to 8 members (numeric snowflake) |
+| `BOT_GUILD_ID` | One guild to load members from at boot (numeric snowflake) |
 | `OWNER_ID_STR` | Who can run LED / set1 / set2 / servo |
 | `TARGET_CHANNEL_ID` | Commands + auto sysinfo / scheduled summaries |
 | `TARGET_CHANNEL_ID1` | Second channel where commands are allowed |
@@ -120,7 +120,7 @@ const String TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";
 
 IDs are **digits only**. Paste them as C strings, for example `"123456789012345678"`.
 
-If `BOT_GUILD_ID` is still the placeholder, boot tries to resolve the guild from `TARGET_CHANNEL_ID`.
+Boot loads OLED names from `BOT_GUILD_ID` and from the guilds of `TARGET_CHANNEL_ID` and `TARGET_CHANNEL_ID1` (so both servers get names). Duplicate users are stored once. Slots are split across those guilds, then any leftover rows are filled.
 
 ---
 
