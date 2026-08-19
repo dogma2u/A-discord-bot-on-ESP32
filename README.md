@@ -261,4 +261,3 @@ Do not enable `heap_caps_malloc_extmem_enable` for small allocations. Wi‑Fi / 
 
 - Never commit a sketch that contains a live bot token, API key, password, or Discord snowflake ID.
 - If a token leaks, reset it in the Developer Portal immediately.
-- Owner commands move a servo and drive GPIO. Only put your user ID in `OWNER_ID_STR` on the machine that uploads firmware.
