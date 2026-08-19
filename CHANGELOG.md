@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2
+
+- OLED: eight user rows; `Srv:` bar (0–90°, boot at 45°); command / `!display` text on rows 15–16 (dashboard is not wiped).
+- `!display` is public; payload only, 50 characters (25 + 25), 6 seconds, overwrite restarts the timer.
+- Member names load from `BOT_GUILD_ID` and both command-channel guilds (two servers).
+- `!ask`: `max_tokens` 900, 12288-byte JSON parse, 3600-character Discord post.
+- `!sysinfo` includes a GitHub firmware URL with Discord link embeds suppressed.
+- `!help` and README command lists are alphabetical. README matches the current dashboard.
+
 ## 0.4.1
 
 - Dashboard user stats: seven rows (was five).

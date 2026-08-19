@@ -674,10 +674,11 @@ String getSystemInfo() {
          "• **Free Heap:** " + String((unsigned long)freeHeap) + " / " +
          String((unsigned long)totalHeap) + " bytes\n"
          "• **WiFi RSSI:** " + String(rssi) + " dBm\n"
-         "• **Gateway Status:** " + String(gatewayConnected ? "Connected" : "Disconnected");
+         "• **Gateway Status:** " + String(gatewayConnected ? "Connected" : "Disconnected") + "\n"
+         "• **Firmware:** https://github.com/dogma2u/A-discord-bot-on-ESP32";
 }
 // Discord REST: POST a chat message to a channel.
-bool sendDiscordMessage(const String& channelId, const String& content) {
+bool sendDiscordMessage(const String& channelId, const String& content, bool suppressEmbeds = false) {
   httpsClient.stop();
   httpsClient.setInsecure();
   if (!httpsClient.connect("discord.com", 443)) {
@@ -688,6 +689,8 @@ bool sendDiscordMessage(const String& channelId, const String& content) {
   StaticJsonDocument<2048> doc;
   doc["content"] = content;
   doc["tts"] = false;
+  if (suppressEmbeds) doc["flags"] = 4; // SUPPRESS_EMBEDS: link stays a URL, no GitHub card
+
   String body;
   serializeJson(doc, body);
   String request =
@@ -1542,7 +1545,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
     return;
   }
   if (cmd.startsWith("!sysinfo")) {
-    sendDiscordMessage(channelId, getSystemInfo());
+    sendDiscordMessage(channelId, getSystemInfo(), true);
     dashLastEvent = "SysInfo sent";
     showTransient("SysInfo", "Sent");
     return;
@@ -1782,7 +1785,7 @@ void backgroundTasks() {
   // Every 4 hours: System Health Report
   if (now - lastSysInfoMillis >= SYSINFO_INTERVAL_MS || lastSysInfoMillis == 0) {
     lastSysInfoMillis = now;
-    sendDiscordMessage(TARGET_CHANNEL_ID, getSystemInfo());
+    sendDiscordMessage(TARGET_CHANNEL_ID, getSystemInfo(), true);
   }
   // Scheduled Daily Summaries (6 AM, 12 PM, 6 PM)
   updateLocalTime();
