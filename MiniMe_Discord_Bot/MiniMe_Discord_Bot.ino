@@ -25,9 +25,10 @@
  4) GPIO, servo, DS18B20, NeoPixel
  5) Discord REST, public HTTP APIs, command handler
  6) Touch wake pad (GPIO 4 capacitive sensor)
- 7) Gateway websocket, scheduled posts, setup / loop
+ 7) Gateway websocket, bot Online/Idle presence, scheduled posts, setup / loop
  Display sleep dims then blanks the OLED only. ESP32 and Wi-Fi stay running.
  Touch on GPIO 4 wakes the panel with the same on/dim/off timing.
+ Bot Discord status: online on activity/touch; idle after 5 minutes quiet.
 */
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -141,6 +142,14 @@ bool identified           = false;
 int  heartbeatIntervalMs   = 0;
 unsigned long lastHeartbeatMillis = 0;
 int lastSeq               = 0;
+// Bot's own Discord status (Gateway OP 3). Not the 8-user OLED rows.
+unsigned long lastBotActivityMillis = 0;
+const unsigned long BOT_PRESENCE_IDLE_MS = 300000UL; // 5 minutes quiet -> Idle
+uint8_t botDiscordStatus = 2; // 1=idle, 2=online
+bool botDiscordStatusSent = false;
+void noteBotActivity();
+void updateBotPresenceIdle();
+void sendBotPresence(const char* status, bool afk);
 // ====== DISPLAY STATE ======
 // Full-buffer U8g2 on SSD1327. No setCursor: drawStr(x, y) uses y as the font baseline.
 // Waveshare-style 1.5" 128x128 SSD1327. EA_W128128 shifts the picture down so
@@ -288,10 +297,10 @@ void applyPresencesArray(JsonArray presences) {
       trackedUsers[idx].status = newSt;
       noteDisplayActivity();
     }
-    Serial.print("[PRESENCE] ");
-    Serial.print(trackedUsers[idx].userName);
-    Serial.print(" -> ");
-    Serial.println(statusToWord(trackedUsers[idx].status));
+    // Serial.print("[PRESENCE] ");
+    // Serial.print(trackedUsers[idx].userName);
+    // Serial.print(" -> ");
+    // Serial.println(statusToWord(trackedUsers[idx].status));
   }
 }
 
@@ -324,8 +333,8 @@ void requestTrackedUserPresences() {
     String payload;
     serializeJson(doc, payload);
     gatewayWS.sendTXT(payload);
-    Serial.print("[GW] Request Guild Members (presences) sent for ");
-    Serial.println(cachedGuildIds[g]);
+    // Serial.print("[GW] Request Guild Members (presences) sent for ");
+    // Serial.println(cachedGuildIds[g]);
   }
 }
 
@@ -467,17 +476,17 @@ void configureTouchHardware() {
 
 // Call once in setup() after WiFi/I2C — do not recalibrate earlier.
 void setupTouch() {
-  Serial.println("--- touch init ---");
+  // Serial.println("--- touch init ---");
   configureTouchHardware();
   calibrateTouchIdleMin();
   touchDetachInterrupt(PIN_TOUCH);
   touchAttachInterrupt(PIN_TOUCH, onTouchWake, 0);
-  Serial.print("touch GPIO");
-  Serial.print(PIN_TOUCH);
-  Serial.print(" idleMin=");
-  Serial.print(touchIdleMin);
-  Serial.print(" trip=");
-  Serial.println(touchIdleMin + TOUCH_THRESHOLD);
+  // Serial.print("touch GPIO");
+  // Serial.print(PIN_TOUCH);
+  // Serial.print(" idleMin=");
+  // Serial.print(touchIdleMin);
+  // Serial.print(" trip=");
+  // Serial.println(touchIdleMin + TOUCH_THRESHOLD);
 }
 
 void debugTouchSerial() {
@@ -492,16 +501,16 @@ void debugTouchSerial() {
   if (!touched) updateTouchIdleMin(raw);
   if (raw > touchRawMax) touchRawMax = raw;
 
-  Serial.print("touch GPIO");
-  Serial.print(PIN_TOUCH);
-  Serial.print(": raw=");
-  Serial.print(raw);
-  Serial.print(" idleMin=");
-  Serial.print(touchIdleMin);
-  Serial.print(" trip=");
-  Serial.print(trip);
-  Serial.print(" touched=");
-  Serial.println(touched ? "YES" : "no");
+  // Serial.print("touch GPIO");
+  // Serial.print(PIN_TOUCH);
+  // Serial.print(": raw=");
+  // Serial.print(raw);
+  // Serial.print(" idleMin=");
+  // Serial.print(touchIdleMin);
+  // Serial.print(" trip=");
+  // Serial.print(trip);
+  // Serial.print(" touched=");
+  // Serial.println(touched ? "YES" : "no");
 }
 
 bool touchIsActive() {
@@ -522,6 +531,7 @@ void pollTouchWake() {
   touchWakePending = false;
   lastTouchWakeMillis = now;
   noteDisplayActivity();
+  noteBotActivity(); // touch also sets Discord Online
 }
 
 // After 1 minute idle, dim over 15 s, then blank the OLED. Clock/RSSI/heap ticks do not count.
@@ -822,22 +832,34 @@ String getSystemInfo() {
          "• **Free Heap:** " + String((unsigned long)freeHeap) + " / " +
          String((unsigned long)totalHeap) + " bytes\n"
          "• **WiFi RSSI:** " + String(rssi) + " dBm\n"
-         "• **Gateway Status:** " + String(gatewayConnected ? "Connected" : "Disconnected") + "\n"
+         "• **Gateway Status:** " + String((gatewayConnected && identified) ? "Connected" : "Disconnected") + "\n"
          "• **Firmware:** https://github.com/dogma2u/A-discord-bot-on-ESP32";
 }
-// Discord REST: POST a chat message to a channel.
+// Discord REST: POST a chat message to a channel (content max 2000 chars).
+bool httpsInUse = false; // blocks re-entrant REST while DeepSeek (or other) holds httpsClient
 bool sendDiscordMessage(const String& channelId, const String& content, bool suppressEmbeds = false) {
+  if (httpsInUse) return false;
+  String post = content;
+  if (post.length() > 2000) post = post.substring(0, 1997) + "...";
+  httpsInUse = true;
   httpsClient.stop();
   httpsClient.setInsecure();
   if (!httpsClient.connect("discord.com", 443)) {
-    Serial.println("[REST] HTTPS connect failed");
+    // Serial.println("[REST] HTTPS connect failed");
+    httpsInUse = false;
     return false;
   }
   String url = "/api/v10/channels/" + channelId + "/messages";
-  StaticJsonDocument<2048> doc;
-  doc["content"] = content;
+  // 4096 fits Discord's 2000-char content plus JSON overhead.
+  StaticJsonDocument<4096> doc;
+  doc["content"] = post;
   doc["tts"] = false;
   if (suppressEmbeds) doc["flags"] = 4; // SUPPRESS_EMBEDS: link stays a URL, no GitHub card
+  if (post.length() > 0 && doc["content"].isNull()) {
+    httpsClient.stop();
+    httpsInUse = false;
+    return false;
+  }
 
   String body;
   serializeJson(doc, body);
@@ -851,15 +873,61 @@ bool sendDiscordMessage(const String& channelId, const String& content, bool sup
     body;
   httpsClient.print(request);
   unsigned long start = millis();
+  String statusLine;
   while (httpsClient.connected() && millis() - start < 5000) {
     if (httpsClient.available()) {
       String line = httpsClient.readStringUntil('\n');
-      if (line == "\r") break;
+      if (statusLine.length() == 0) statusLine = line;
+      if (line == "\r" || line.length() == 0) break;
     }
   }
   httpsClient.stop();
-  return true;
+  httpsInUse = false;
+  statusLine.trim();
+  int code = 0;
+  int sp = statusLine.indexOf(' ');
+  if (sp >= 0) code = statusLine.substring(sp + 1).toInt();
+  return code >= 200 && code < 300;
 }
+// Gateway OP 3: set MiniMe's Discord Online / Idle status.
+void sendBotPresence(const char* status, bool afk) {
+  if (!gatewayConnected || !identified) return;
+  StaticJsonDocument<256> doc;
+  doc["op"] = 3;
+  JsonObject d = doc.createNestedObject("d");
+  d["since"] = nullptr;
+  d.createNestedArray("activities");
+  d["status"] = status;
+  d["afk"] = afk;
+  String payload;
+  serializeJson(doc, payload);
+  gatewayWS.sendTXT(payload);
+}
+
+// Mark activity: Online on Discord; restart the 5-minute idle timer.
+void noteBotActivity() {
+  lastBotActivityMillis = millis();
+  if (!gatewayConnected || !identified) return;
+  if (botDiscordStatus == 2 && botDiscordStatusSent) return;
+  botDiscordStatus = 2;
+  botDiscordStatusSent = true;
+  sendBotPresence("online", false);
+}
+
+// After 5 minutes with no activity, set Discord status to Idle.
+void updateBotPresenceIdle() {
+  if (!gatewayConnected || !identified) return;
+  if (lastBotActivityMillis == 0) {
+    lastBotActivityMillis = millis();
+    return;
+  }
+  if (botDiscordStatus == 1) return;
+  if (millis() - lastBotActivityMillis < BOT_PRESENCE_IDLE_MS) return;
+  botDiscordStatus = 1;
+  botDiscordStatusSent = true;
+  sendBotPresence("idle", true);
+}
+
 // Gateway OP 2 IDENTIFY after HELLO. Intents 37635 include members + presences + message content.
 void sendIdentify() {
   StaticJsonDocument<1024> doc;
@@ -874,10 +942,18 @@ void sendIdentify() {
   d["large_threshold"] = 250;
   // Include PRESENCE_UPDATE so we can show "online" status on the display.
   d["intents"] = 37635; // GUILDS + GUILD_MEMBERS + GUILD_PRESENCES + GUILD_MESSAGES + DIRECT_MESSAGES + MESSAGE_CONTENT
+  JsonObject presence = d.createNestedObject("presence");
+  presence["since"] = nullptr;
+  presence.createNestedArray("activities");
+  presence["status"] = "online";
+  presence["afk"] = false;
   String payload;
   serializeJson(doc, payload);
   gatewayWS.sendTXT(payload);
-  Serial.println("[GW] IDENTIFY sent");
+  lastBotActivityMillis = millis();
+  botDiscordStatus = 2;
+  botDiscordStatusSent = true;
+  // Serial.println("[GW] IDENTIFY sent");
 }
 // Gateway OP 1 keep-alive. Interval comes from HELLO (op 10).
 void sendHeartbeat() {
@@ -891,7 +967,7 @@ void sendHeartbeat() {
   String payload;
   serializeJson(doc, payload);
   gatewayWS.sendTXT(payload);
-  Serial.println("[GW] HEARTBEAT sent");
+  // Serial.println("[GW] HEARTBEAT sent");
 }
 void pumpGateway() {
   gatewayWS.loop();
@@ -1027,14 +1103,14 @@ String guildIdFromChannel(const String& channelId) {
 
   String body, status;
   if (!discordRestGet("/api/v10/channels/" + channelId, body, status)) {
-    Serial.print("[MEMBERS] channel lookup failed: ");
-    Serial.println(status);
+    // Serial.print("[MEMBERS] channel lookup failed: ");
+    // Serial.println(status);
     return "";
   }
   int jsonStart = body.indexOf('{');
   if (jsonStart < 0) {
-    Serial.print("[MEMBERS] channel lookup: no JSON. ");
-    Serial.println(status);
+    // Serial.print("[MEMBERS] channel lookup: no JSON. ");
+    // Serial.println(status);
     return "";
   }
   if (jsonStart > 0) body = body.substring(jsonStart);
@@ -1044,13 +1120,13 @@ String guildIdFromChannel(const String& channelId) {
   StaticJsonDocument<512> doc;
   DeserializationError err = deserializeJson(doc, body, DeserializationOption::Filter(filter));
   if (err) {
-    Serial.print("[MEMBERS] channel JSON error: ");
-    Serial.println(err.c_str());
+    // Serial.print("[MEMBERS] channel JSON error: ");
+    // Serial.println(err.c_str());
     return "";
   }
   String gid = doc["guild_id"] | "";
-  Serial.print("[MEMBERS] guild from channel: ");
-  Serial.println(gid);
+  // Serial.print("[MEMBERS] guild from channel: ");
+  // Serial.println(gid);
   return gid;
 }
 
@@ -1072,18 +1148,18 @@ bool appendMembersFromGuild(const String& guildId, uint8_t maxToAdd) {
   String body, status;
   String path = "/api/v10/guilds/" + guildId + "/members?limit=200";
   if (!discordRestGet(path, body, status)) {
-    Serial.print("[MEMBERS] fetch failed: ");
-    Serial.println(status);
+    // Serial.print("[MEMBERS] fetch failed: ");
+    // Serial.println(status);
     return false;
   }
-  Serial.print("[MEMBERS] HTTP ");
-  Serial.println(status);
+  // Serial.print("[MEMBERS] HTTP ");
+  // Serial.println(status);
 
   int jsonStart = body.indexOf('[');
   int objStart = body.indexOf('{');
   if (jsonStart < 0 || (objStart >= 0 && objStart < jsonStart)) {
-    Serial.print("[MEMBERS] not a member array: ");
-    Serial.println(body.substring(0, 180));
+    // Serial.print("[MEMBERS] not a member array: ");
+    // Serial.println(body.substring(0, 180));
     return false;
   }
   if (jsonStart > 0) body = body.substring(jsonStart);
@@ -1098,14 +1174,14 @@ bool appendMembersFromGuild(const String& guildId, uint8_t maxToAdd) {
   DynamicJsonDocument doc(8192);
   DeserializationError err = deserializeJson(doc, body, DeserializationOption::Filter(filter));
   if (err) {
-    Serial.print("[MEMBERS] JSON parse error: ");
-    Serial.println(err.c_str());
+    // Serial.print("[MEMBERS] JSON parse error: ");
+    // Serial.println(err.c_str());
     return false;
   }
 
   JsonArray members = doc.as<JsonArray>();
   if (members.isNull()) {
-    Serial.println("[MEMBERS] no member array");
+    // Serial.println("[MEMBERS] no member array");
     return false;
   }
 
@@ -1129,15 +1205,15 @@ bool appendMembersFromGuild(const String& guildId, uint8_t maxToAdd) {
     trackedUsers[slot].userName = name;
     trackedUsers[slot].status = 0;
     trackedUsers[slot].useCount24h = 0;
-    Serial.print("[MEMBERS] ");
-    Serial.print(slot);
-    Serial.print(": ");
-    Serial.println(name);
+    // Serial.print("[MEMBERS] ");
+    // Serial.print(slot);
+    // Serial.print(": ");
+    // Serial.println(name);
     added++;
   }
 
-  Serial.print("[MEMBERS] added from guild: ");
-  Serial.println(added);
+  // Serial.print("[MEMBERS] added from guild: ");
+  // Serial.println(added);
   return added > 0;
 }
 
@@ -1150,7 +1226,7 @@ bool fetchGuildMembersAtStartup() {
   rememberGuildId(guildIdFromChannel(String(TARGET_CHANNEL_ID1)));
 
   if (cachedGuildCount == 0) {
-    Serial.println("[MEMBERS] no valid BOT_GUILD_ID or channel guilds");
+    // Serial.println("[MEMBERS] no valid BOT_GUILD_ID or channel guilds");
     return false;
   }
 
@@ -1167,8 +1243,8 @@ bool fetchGuildMembersAtStartup() {
   for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
     if (trackedUsers[i].active) n++;
   }
-  Serial.print("[MEMBERS] loaded users: ");
-  Serial.println(n);
+  // Serial.print("[MEMBERS] loaded users: ");
+  // Serial.println(n);
   return any;
 }
 
@@ -1436,9 +1512,10 @@ bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
   }
   return outBody.length() > 0;
 }
-// !ask — DeepSeek chat completion (max_tokens 900; Discord post capped at 3600 chars).
+// !ask — DeepSeek chat completion (max_tokens 900; Discord post capped at 2000 chars).
 bool askDeepSeek(const String& question, String& outReport) {
-  if (DEEPSEEK_API_KEY == nullptr || strlen(DEEPSEEK_API_KEY) == 0) {
+  if (DEEPSEEK_API_KEY == nullptr || strlen(DEEPSEEK_API_KEY) == 0 ||
+      strcmp(DEEPSEEK_API_KEY, "DEEPSEEK_API_KEY") == 0) {
     outReport = "DeepSeek API key not set. Add DEEPSEEK_API_KEY in the sketch.";
     return false;
   }
@@ -1459,22 +1536,22 @@ bool askDeepSeek(const String& question, String& outReport) {
   JsonArray messages = req.createNestedArray("messages");
   JsonObject sys = messages.createNestedObject();
   sys["role"] = "system";
-  sys["content"] = "You are MiniMe on an ESP32 Discord bot. Answer clearly for science, tech, and physics. Use up to 900 tokens. Keep the answer within 3600 characters so it fits the Discord post.";
+  sys["content"] = "You are MiniMe on an ESP32 Discord bot. Answer clearly for science, tech, and physics. Keep the full answer under 1800 characters so it fits one Discord message.";
   JsonObject user = messages.createNestedObject();
   user["role"] = "user";
   user["content"] = q;
   String body;
   serializeJson(req, body);
-  Serial.println("[ASK] TLS connect api.deepseek.com");
+  // Serial.println("[ASK] TLS connect api.deepseek.com");
   httpsClient.stop();
   httpsClient.setInsecure();
   httpsClient.setTimeout(25000);
   if (!httpsClient.connect("api.deepseek.com", 443)) {
     outReport = "DeepSeek connection failed.";
-    Serial.println("[ASK] TLS connect failed");
+    // Serial.println("[ASK] TLS connect failed");
     return false;
   }
-  Serial.println("[ASK] POST /chat/completions");
+  // Serial.println("[ASK] POST /chat/completions");
   String request =
     "POST /chat/completions HTTP/1.1\r\n"
     "Host: api.deepseek.com\r\n"
@@ -1487,7 +1564,7 @@ bool askDeepSeek(const String& question, String& outReport) {
     "Connection: close\r\n\r\n" +
     body;
   httpsClient.print(request);
-  unsigned long deadline = millis() + 30000UL;
+  unsigned long deadline = millis() + 45000UL;
   while (httpsClient.available() == 0) {
     pumpGateway();
     if (millis() > deadline) {
@@ -1559,7 +1636,7 @@ bool askDeepSeek(const String& question, String& outReport) {
           }
           if (c == '"') break;
           extracted += c;
-          if (extracted.length() > 3600) break;
+          if (extracted.length() > 1900) break;
         }
         answer = collapseWhitespace(extracted);
       }
@@ -1569,24 +1646,40 @@ bool askDeepSeek(const String& question, String& outReport) {
     outReport = "DeepSeek returned an empty answer. " + truncateText(statusLine, 60);
     return false;
   }
-  outReport = "🧠 **DeepSeek:**\n" + truncateText(answer, 3600);
+  const char* prefix = "🧠 **DeepSeek:**\n";
+  int room = 2000 - (int)strlen(prefix);
+  if (room < 100) room = 100;
+  outReport = String(prefix) + truncateText(answer, room);
   return true;
 }
 void runAskFromLoop() {
   if (!askNeedPost) return;
   askNeedPost = false;
+  String channelId = askPendingChannelId;
   String report;
-  if (askDeepSeek(askPendingQuestion, report)) {
-    sendDiscordMessage(askPendingChannelId, report);
+  httpsInUse = true; // keep Gateway from starting other HTTPS during DeepSeek
+  bool ok = askDeepSeek(askPendingQuestion, report);
+  httpsInUse = false;
+  askPendingQuestion = "";
+  askPendingChannelId = "";
+  if (!sendDiscordMessage(channelId, report)) {
+    // Short fallback so the user always sees something if the long post was rejected.
+    String fallback = ok
+      ? "DeepSeek answered, but Discord rejected the post (try a shorter question)."
+      : truncateText(report, 1800);
+    if (!sendDiscordMessage(channelId, fallback)) {
+      dashLastEvent = "Ask post fail";
+      showTransient("DeepSeek", "Post fail");
+      return;
+    }
+  }
+  if (ok) {
     dashLastEvent = "Ask sent";
     showTransient("DeepSeek", "Sent");
   } else {
-    sendDiscordMessage(askPendingChannelId, report);
     dashLastEvent = "Ask error";
     showTransient("DeepSeek", "Error");
   }
-  askPendingQuestion = "";
-  askPendingChannelId = "";
 }
 // ====== DISCORD COMMAND DISPATCH ======
 // Public commands first; anything else requires OWNER_ID_STR.
@@ -1597,6 +1690,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
   if (!isDM && channelId != TARGET_CHANNEL_ID && channelId != TARGET_CHANNEL_ID1) {
     return;
   }
+  noteBotActivity();
   String cmd = content;
   cmd.trim();
 
@@ -1767,7 +1861,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
     askNeedPost = true;
     dashLastEvent = "Ask queued";
     showTransient("DeepSeek", "Queued");
-    Serial.println("[ASK] queued (HTTPS from loop)");
+    // Serial.println("[ASK] queued (HTTPS from loop)");
     return;
   }
   if (cmd.startsWith("!display")) {
@@ -1871,13 +1965,14 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
     case WStype_DISCONNECTED:
       gatewayConnected = false;
       identified       = false;
-      Serial.println("[GW] DISCONNECTED");
+      botDiscordStatusSent = false;
+      // Serial.println("[GW] DISCONNECTED");
       dashLastEvent = "GW Disconnected";
       showTransient("Gateway", "Disconnected");
       break;
     case WStype_CONNECTED:
       gatewayConnected = true;
-      Serial.println("[GW] CONNECTED");
+      // Serial.println("[GW] CONNECTED");
       dashLastEvent = "GW Connected";
       showTransient("Gateway", "Connected");
       break;
@@ -1950,6 +2045,7 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
           return;
         }
         if (strcmp(t, "MESSAGE_CREATE") == 0) {
+          if (httpsInUse) return; // DeepSeek holds HTTPS; defer commands until free
           JsonObject d = (*gwDoc)["d"];
           if (d["author"]["bot"] == true) return;
           String content   = d["content"].as<String>();
@@ -1974,9 +2070,11 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
 void backgroundTasks() {
   runAskFromLoop();
   unsigned long now = millis();
-  // Every 4 hours: System Health Report
-  if (now - lastSysInfoMillis >= SYSINFO_INTERVAL_MS || lastSysInfoMillis == 0) {
+  // Every 4 hours: System Health Report (wait for Gateway so boot post is not "Disconnected")
+  if (gatewayConnected && identified &&
+      (lastSysInfoMillis == 0 || now - lastSysInfoMillis >= SYSINFO_INTERVAL_MS)) {
     lastSysInfoMillis = now;
+    noteBotActivity();
     sendDiscordMessage(TARGET_CHANNEL_ID, getSystemInfo(), true);
   }
   // Scheduled Daily Summaries (6 AM, 12 PM, 6 PM)
@@ -1987,6 +2085,7 @@ void backgroundTasks() {
     if (lastSentHour != currentHour) {
       lastSentHour = currentHour;
       float c, f;
+      noteBotActivity();
       if (readTemperature(c, f)) {
         String report = "⏰ **Scheduled Summary (" + String(currentHour) + ":00):**\n" +
                         "• **Indoor Temp:** " + String(c, 1) + "°C / " + String(f, 1) + "°F";
@@ -2024,13 +2123,13 @@ void connectGateway() {
 }
 // Boot: serial, PSRAM JSON, OLED, pins, Wi-Fi, NTP, member list, then Gateway.
 void setup() {
-  Serial.begin(115200);
+  // Serial.begin(115200);
   delay(500);
-  Serial.print("PSRAM size: ");
-  Serial.println(ESP.getPsramSize());
+  // Serial.print("PSRAM size: ");
+  // Serial.println(ESP.getPsramSize());
   gwDoc = new DynamicJsonDocument(GW_DOC_PSRAM);
-  Serial.print("GW JSON cap: ");
-  Serial.println(gwDoc->capacity());
+  // Serial.print("GW JSON cap: ");
+  // Serial.println(gwDoc->capacity());
   initTrackedUsers();
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   u8g2.begin();
@@ -2060,8 +2159,9 @@ void setup() {
 void loop() {
   pumpGateway();
   backgroundTasks();
-  debugTouchSerial();
+  // debugTouchSerial(); // Serial debug off to reduce CPU load
   pollTouchWake();
+  updateBotPresenceIdle();
   updateDisplay();
   delay(5);
 }

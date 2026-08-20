@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.7
+
+- Fix `!ask` silent failures: Discord 2000-char post limit, larger REST JSON buffer, HTTP status check, HTTPS busy lock while DeepSeek runs, short fallback if the reply post fails.
+
+## 0.4.6
+
+- Boot auto `!sysinfo` waits until Gateway is connected and identified (no more false "Disconnected").
+
+## 0.4.5
+
+- Bot Discord presence: Online on commands, scheduled posts, and touch; Idle after 5 minutes quiet (Gateway OP 3).
+- Serial logging commented out (including touch debug in `loop`) to reduce CPU load.
+
 ## 0.4.4
 
 - Capacitive touch wake on GPIO 4: tap pad to turn the OLED back on after dim/off (1 min idle, 15 s fade).

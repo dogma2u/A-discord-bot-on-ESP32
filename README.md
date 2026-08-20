@@ -39,14 +39,22 @@ Same list Discord shows for `!help`:
 
 Sent to `TARGET_CHANNEL_ID` (no command needed):
 
-- Every **4 hours:** system diagnostics
+- Every **4 hours:** system diagnostics (first post waits until Gateway is connected)
 - Daily at **6:00, 12:00, and 18:00** (Pacific): indoor temperature summary
+
+### Bot Discord presence
+
+MiniMe’s own Discord status (green Online / yellow Idle), not the OLED user rows:
+
+- Starts **Online** when the Gateway identifies
+- Goes **Idle** after **5 minutes** with no activity
+- Returns to **Online** on commands, scheduled posts, or **touch** on the wake pad
 
 ### `!ask` / DeepSeek
 
 - Request `max_tokens`: **900**
 - JSON parse buffer: **12288** bytes
-- Discord post cap: **3600** characters
+- Discord post cap: **2000** characters (Discord limit)
 - HTTPS on the ESP32 can take several seconds
 - `!ask` is queued off the Discord Gateway thread; heartbeats keep running while DeepSeek waits
 
