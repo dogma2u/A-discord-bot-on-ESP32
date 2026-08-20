@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.4
+
+- Capacitive touch wake on GPIO 4: tap pad to turn the OLED back on after dim/off (1 min idle, 15 s fade).
+- README: touch pad wiring, calibration, Serial debug, and threshold tuning. Display sleep timing matches firmware.
+- Sketch section headers for user tracking, touch wake, Discord REST, and setup/loop.
+
 ## 0.4.3
 
 - `!ask` is queued from the Gateway callback; DeepSeek HTTPS runs from `loop()` with heartbeats pumped so Discord stays connected.

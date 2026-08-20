@@ -82,11 +82,11 @@ Commands and gateway events **do not wipe** the dashboard. They write **rows 15 
 
 ### Display sleep
 
-After **10 minutes** with no real events, the panel turns **off** (`u8g2.setPowerSave(1)`). That is OLED power-save only. The microcontroller, Wi-Fi, and Discord Gateway keep running.
+After **1 minute** with no real events, contrast **dims over 15 seconds**, then the panel turns **off** (`u8g2.setPowerSave(1)`). That is OLED power-save only. The microcontroller, Wi-Fi, and Discord Gateway keep running.
 
 These **do not** reset the timer: signal / heap / servo bars, clock, uptime, and the 2-second dashboard refresh.
 
-These **wake** the panel and restart the 10-minute timer: Discord commands, presence status changes, gateway connect/disconnect, `!display`, scheduled reports, and other status lines on rows 15–16.
+These **wake** the panel and restart the 1-minute timer: **touch on the wake pad (GPIO 4)**, Discord commands, presence status changes, gateway connect/disconnect, `!display`, scheduled reports, and other status lines on rows 15–16.
 
 ---
 
@@ -231,8 +231,49 @@ Display: **SSD1327**, **128×128** pixels, I2C.
 | DS18B20 data | 10 |
 | OLED SSD1327 (128×128) SDA | 8 |
 | OLED SSD1327 (128×128) SCL | 9 |
+| Touch wake pad | 4 |
 
 OLED module labels: **GND, VCC, SCL, SDA**. The panel is **128×128**. Change pins in the sketch if your wiring differs.
+
+---
+
+## Touch wake pad (GPIO 4)
+
+The ESP32-S3 has a **built-in capacitive touch sensor** on **GPIO 4** (`TOUCH4`). MiniMe uses it to wake the OLED when the panel has dimmed or turned off. No Discord command is required — tap the pad like a light switch.
+
+### Wiring
+
+1. Connect a **conductive pad** to **GPIO 4** on the ESP32-S3:
+   - Copper tape, a short wire, a small metal plate, or a spring contact all work.
+   - Solder or screw the pad lead to the **GPIO 4** header pin (or a breadboard row tied to GPIO 4).
+2. **No external resistor or pull-up** is needed. Touch sensing uses the chip’s internal capacitive front end.
+3. **Ground reference:** a finger touching the pad (or a grounded metal bezel) completes the capacitive path. Mount the pad where you can reach it when the display is asleep.
+4. Keep the touch lead **short** and away from noisy switching loads (servo, NeoPixel) if possible. Long loose wires pick up noise and can false-trigger.
+
+### How it works in firmware
+
+- **`PIN_TOUCH`** is **4** (change in the sketch if you use a different touch-capable GPIO).
+- At boot, **`setupTouch()`** runs **after Wi-Fi and I2C** so calibration is stable. It takes ~20 idle samples and stores the median as **`touchIdleMin`**.
+- A touch is detected when the raw reading rises above **`touchIdleMin + TOUCH_THRESHOLD`** (default **3500**). While idle, the firmware slowly tracks a lower baseline so drift does not block wakes.
+- **`touchAttachInterrupt`** fires on touch; **`pollTouchWake()`** in `loop()` debounces (**300 ms**) and calls the same wake path as a Discord event (full contrast, 1-minute idle timer restarted).
+- Serial monitor **115200** prints debug every **500 ms**, for example:
+  ```
+  touch GPIO4: raw=42000 idleMin=38000 trip=41500 touched=YES
+  ```
+  On boot you also see `--- touch init ---` with `idleMin` and `trip`.
+
+### Tuning sensitivity
+
+If the pad is **hard to trigger**, increase **`TOUCH_THRESHOLD`** in the sketch (try **4500** or **5000**).
+
+If it **false-triggers** or stays “touched” when idle, **decrease** the threshold (try **2500**) or use a **smaller pad**.
+
+After changing the threshold, re-upload and watch Serial: tap the pad and confirm `touched=YES` only when you touch it, and `raw` rises clearly above `trip`.
+
+### What touch does *not* do
+
+- Touch **only wakes the OLED**. It does not send Discord messages, move the servo, or change GPIO outputs.
+- The ESP32, Wi-Fi, and Gateway **never sleep** — only the display blanks to save the panel.
 
 ---
 
@@ -251,8 +292,8 @@ OLED module labels: **GND, VCC, SCL, SDA**. The panel is **128×128**. Change pi
    - NTPClient
 5. Open `MiniMe_Discord_Bot/MiniMe_Discord_Bot.ino`.
 6. Fill in Wi‑Fi, token, keys, and IDs.
-7. Upload. Serial monitor **115200**: look for PSRAM size, `[GW] CONNECTED`, and `[GW] IDENTIFY sent`.
-8. In Discord, try `!help`.
+7. Upload. Serial monitor **115200**: look for PSRAM size, `[GW] CONNECTED`, `[GW] IDENTIFY sent`, and `--- touch init ---`.
+8. In Discord, try `!help`. Tap the GPIO 4 pad to wake the OLED after it dims off.
 
 Do not enable `heap_caps_malloc_extmem_enable` for small allocations. Wi‑Fi / TLS in PSRAM can crash this board. Gateway JSON (`256KB`) is allocated in PSRAM on purpose.
 

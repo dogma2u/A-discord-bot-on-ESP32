@@ -24,8 +24,10 @@
  3) SSD1327 dashboard, sleep, overlays (U8g2 drawStr; y is font baseline)
  4) GPIO, servo, DS18B20, NeoPixel
  5) Discord REST, public HTTP APIs, command handler
- 6) Gateway websocket, scheduled posts, setup / loop
- Display sleep blanks the OLED only. ESP32 and Wi-Fi stay running.
+ 6) Touch wake pad (GPIO 4 capacitive sensor)
+ 7) Gateway websocket, scheduled posts, setup / loop
+ Display sleep dims then blanks the OLED only. ESP32 and Wi-Fi stay running.
+ Touch on GPIO 4 wakes the panel with the same on/dim/off timing.
 */
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -41,6 +43,7 @@
 #include <NTPClient.h>
 #include <time.h>
 #include <esp_heap_caps.h>
+#include <esp_idf_version.h>
 // ====== USER CONFIG ======
 // Local-only secrets. GitHub sketch keeps placeholders. Do not commit real values.
 const char* WIFI_SSID     = "ssid";
@@ -69,6 +72,9 @@ const int PIN_DS18B20 = 10;
 // I2C SSD1327 128x128 (GND / VCC / SCL / SDA on the module)
 const int PIN_I2C_SDA = 8;
 const int PIN_I2C_SCL = 9;
+const int PIN_TOUCH   = 4; // TOUCH4 — wire pad here
+const uint32_t TOUCH_THRESHOLD = 3500; // raw rise above idleMin (~5k seen on tap)
+const unsigned long TOUCH_DEBUG_MS = 500;
 // ====== TIME CONFIG (NTP) — US Pacific, with daylight saving ======
 // NTP is fetched as UTC, then offset to PST or PDT for the dashboard clock and scheduled posts.
 WiFiUDP ntpUDP;
@@ -76,7 +82,7 @@ const long PST_OFFSET_SEC = -28800; // UTC-8 standard
 const long PDT_OFFSET_SEC = -25200; // UTC-7 daylight
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 
-// US Pacific DST: 2nd Sunday in March 02:00 PST through 1st Sunday in November 02:00 PDT.
+// US Pacific DST helpers (NTP is UTC; offset applied in updateLocalTime).
 int civilDayOfWeek(int year, int month, int day) { // 0 = Sunday
   static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
   int y = year;
@@ -151,7 +157,7 @@ String dashLastCmd   = "none";
 String dashLastEvent = "Starting...";
 unsigned long dashLastCmdMillis = 0;
 
-// ---- User usage + presence tracking (for dashboard) ----
+// ====== USER TRACKING (8 dashboard rows) ======
 // Eight OLED rows: name, On/Idle/DND/Off, Bot:N (commands in the last 24h).
 // Slots fill from a startup REST member list; presence comes from the Gateway.
 struct TrackedUser {
@@ -356,12 +362,22 @@ String transientLine2 = "";
 String transientLine3 = "";
 unsigned long transientUntilMs = 0;
 
-// Dashboard refresh + OLED sleep. Sleep uses setPowerSave on the panel only; MCU and Wi-Fi stay up.
+// Dashboard refresh + OLED sleep. Full brightness 1 min, then 15 s dim, then panel off.
 unsigned long lastDashMillis = 0;
 const unsigned long DASH_REFRESH_MS = 2000;
 unsigned long lastDisplayActivityMillis = 0;
+
+// ====== TOUCH WAKE (GPIO 4, capacitive pad) ======
+// Built-in ESP32-S3 touch on TOUCH4. Pad on PIN_TOUCH; raw above idleMin + threshold = tap.
+unsigned long lastTouchWakeMillis = 0;
+unsigned long lastTouchDebugMillis = 0;
+uint32_t touchIdleMin = 0;
+uint32_t touchRawMax = 0;
+volatile bool touchWakePending = false;
 bool displayAsleep = false;
-const unsigned long DISPLAY_IDLE_MS = 600000UL; // 10 minutes
+const unsigned long DISPLAY_IDLE_MS = 60000UL; // 1 minute full brightness
+const unsigned long DISPLAY_DIM_MS = 15000UL; // 15 seconds fade to off
+const unsigned long TOUCH_DEBOUNCE_MS = 300;
 const uint8_t DISPLAY_CONTRAST_FULL = 255;
 
 // ====== TEMP SENSOR (DS18B20 on PIN_DS18B20) ======
@@ -379,28 +395,157 @@ bool discordIdLooksValid(const String& id);
 // ====== DISPLAY UTILS ======
 // Wake/sleep, overlays, dashboard paint. U8g2 y is baseline (not Adafruit setCursor).
 
-// Wake the panel if it was in power-save, and restart the 10-minute idle timer.
+// Wake the panel if it was in power-save, and restart the 1-minute idle timer.
 void noteDisplayActivity() {
   lastDisplayActivityMillis = millis();
   if (displayAsleep) {
     displayAsleep = false;
     u8g2.setPowerSave(0);
-    u8g2.setContrast(DISPLAY_CONTRAST_FULL);
     lastDashMillis = 0;
+  }
+  u8g2.setContrast(DISPLAY_CONTRAST_FULL);
+}
+
+// ISR: touchAttachInterrupt sets flag; pollTouchWake() debounces and calls noteDisplayActivity().
+void IRAM_ATTR onTouchWake() {
+  touchWakePending = true;
+}
+
+uint32_t readTouchRaw(uint8_t pin) {
+  return (uint32_t)touchRead(pin);
+}
+
+bool touchSampleValid(uint32_t raw) {
+  return raw > 0 && raw < 150000;
+}
+
+// Boot: median of 20 idle samples → touchIdleMin (trip = idleMin + TOUCH_THRESHOLD).
+void calibrateTouchIdleMin() {
+  uint32_t samples[20];
+  uint8_t count = 0;
+  for (int i = 0; i < 20; i++) {
+    uint32_t raw = readTouchRaw(PIN_TOUCH);
+    if (touchSampleValid(raw)) samples[count++] = raw;
+    delay(25);
+  }
+  if (count == 0) {
+    touchIdleMin = readTouchRaw(PIN_TOUCH);
+    return;
+  }
+  for (uint8_t i = 0; i + 1 < count; i++) {
+    for (uint8_t j = i + 1; j < count; j++) {
+      if (samples[j] < samples[i]) {
+        uint32_t t = samples[i];
+        samples[i] = samples[j];
+        samples[j] = t;
+      }
+    }
+  }
+  touchIdleMin = samples[count / 2];
+  touchRawMax = touchIdleMin;
+}
+
+// Slow drift tracking while not touched (keeps trip point stable over temperature/humidity).
+void updateTouchIdleMin(uint32_t raw) {
+  if (!touchSampleValid(raw)) return;
+  if (raw < touchIdleMin) {
+    touchIdleMin = raw;
+    return;
+  }
+  if (raw <= touchIdleMin + (TOUCH_THRESHOLD / 4)) {
+    touchIdleMin = (touchIdleMin * 31 + raw) / 32;
   }
 }
 
-// After 10 minutes with no real events, blank the OLED. Clock/RSSI/heap ticks do not count.
+void configureTouchHardware() {
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
+  touchSetTiming(0.5f, 100); // Arduino ESP32 3.x / IDF 5.5+
+#else
+  touchSetCycles(1, 100);
+#endif
+}
+
+// Call once in setup() after WiFi/I2C — do not recalibrate earlier.
+void setupTouch() {
+  Serial.println("--- touch init ---");
+  configureTouchHardware();
+  calibrateTouchIdleMin();
+  touchDetachInterrupt(PIN_TOUCH);
+  touchAttachInterrupt(PIN_TOUCH, onTouchWake, 0);
+  Serial.print("touch GPIO");
+  Serial.print(PIN_TOUCH);
+  Serial.print(" idleMin=");
+  Serial.print(touchIdleMin);
+  Serial.print(" trip=");
+  Serial.println(touchIdleMin + TOUCH_THRESHOLD);
+}
+
+void debugTouchSerial() {
+  unsigned long now = millis();
+  if (now - lastTouchDebugMillis < TOUCH_DEBUG_MS) return;
+  lastTouchDebugMillis = now;
+
+  uint32_t raw = readTouchRaw(PIN_TOUCH);
+  uint32_t trip = touchIdleMin + TOUCH_THRESHOLD;
+  bool touched = raw >= trip;
+
+  if (!touched) updateTouchIdleMin(raw);
+  if (raw > touchRawMax) touchRawMax = raw;
+
+  Serial.print("touch GPIO");
+  Serial.print(PIN_TOUCH);
+  Serial.print(": raw=");
+  Serial.print(raw);
+  Serial.print(" idleMin=");
+  Serial.print(touchIdleMin);
+  Serial.print(" trip=");
+  Serial.print(trip);
+  Serial.print(" touched=");
+  Serial.println(touched ? "YES" : "no");
+}
+
+bool touchIsActive() {
+  uint32_t raw = readTouchRaw(PIN_TOUCH);
+  if (raw >= touchIdleMin + TOUCH_THRESHOLD) return true;
+#if SOC_TOUCH_SENSOR_VERSION == 2
+  if (touchInterruptGetLastStatus(PIN_TOUCH)) return true;
+#endif
+  updateTouchIdleMin(raw);
+  return false;
+}
+
+// Polling fallback + interrupt flag; debounced wake into noteDisplayActivity().
+void pollTouchWake() {
+  unsigned long now = millis();
+  if (now - lastTouchWakeMillis < TOUCH_DEBOUNCE_MS) return;
+  if (!touchWakePending && !touchIsActive()) return;
+  touchWakePending = false;
+  lastTouchWakeMillis = now;
+  noteDisplayActivity();
+}
+
+// After 1 minute idle, dim over 15 s, then blank the OLED. Clock/RSSI/heap ticks do not count.
 void updateDisplaySleep() {
   if (displayAsleep) return;
+  unsigned long now = millis();
   if (lastDisplayActivityMillis == 0) {
-    lastDisplayActivityMillis = millis();
+    lastDisplayActivityMillis = now;
     return;
   }
-  if (millis() - lastDisplayActivityMillis >= DISPLAY_IDLE_MS) {
-    displayAsleep = true;
-    u8g2.setPowerSave(1); // panel off until an event
+
+  unsigned long idle = now - lastDisplayActivityMillis;
+  if (idle < DISPLAY_IDLE_MS) return;
+
+  if (idle < DISPLAY_IDLE_MS + DISPLAY_DIM_MS) {
+    unsigned long dimElapsed = idle - DISPLAY_IDLE_MS;
+    uint8_t contrast = (uint8_t)(DISPLAY_CONTRAST_FULL -
+      (dimElapsed * (unsigned long)DISPLAY_CONTRAST_FULL) / DISPLAY_DIM_MS);
+    u8g2.setContrast(contrast);
+    return;
   }
+
+  displayAsleep = true;
+  u8g2.setPowerSave(1); // panel off until touch or a real event
 }
 
 // Queue a 2-line status (OLED rows 15-16). Dashboard is not replaced.
@@ -655,6 +800,9 @@ bool readTemperature(float &tempC, float &tempF) {
   tempF = c * 9.0f / 5.0f + 32.0f;
   return true;
 }
+// ====== DISCORD REST ======
+// HTTPS to discord.com: outbound chat, member fetch, channel lookup.
+
 // Discord body for !sysinfo and the 4-hour auto post (heap includes 8MB PSRAM).
 String getSystemInfo() {
   long rssi = WiFi.RSSI();
@@ -1821,6 +1969,7 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
       break;
   }
 }
+// ====== SCHEDULED POSTS (loop) ======
 // Auto Discord posts: 4-hour sysinfo; 06:00 / 12:00 / 18:00 Pacific indoor temp.
 void backgroundTasks() {
   runAskFromLoop();
@@ -1854,6 +2003,9 @@ void backgroundTasks() {
     }
   }
 }
+// ====== SETUP / LOOP ======
+// Boot order: serial, PSRAM, OLED, pins, Wi-Fi, NTP, members, Gateway, touch, dashboard.
+
 // Station Wi-Fi. Blocks until connected (OLED shows Connecting / Connected).
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
@@ -1873,7 +2025,7 @@ void connectGateway() {
 // Boot: serial, PSRAM JSON, OLED, pins, Wi-Fi, NTP, member list, then Gateway.
 void setup() {
   Serial.begin(115200);
-  delay(50);
+  delay(500);
   Serial.print("PSRAM size: ");
   Serial.println(ESP.getPsramSize());
   gwDoc = new DynamicJsonDocument(GW_DOC_PSRAM);
@@ -1900,6 +2052,7 @@ void setup() {
   connectGateway();
   setServoAngle(45);
   lastDashMillis = 0;
+  setupTouch(); // once, after WiFi/I2C — do not recalibrate earlier
   drawStatus("Ready", "Idle presence");
   drawDashboard();
 }
@@ -1907,6 +2060,8 @@ void setup() {
 void loop() {
   pumpGateway();
   backgroundTasks();
+  debugTouchSerial();
+  pollTouchWake();
   updateDisplay();
   delay(5);
 }
