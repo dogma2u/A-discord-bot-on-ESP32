@@ -2,9 +2,9 @@
 
 MiniMe is firmware for a **WeAct Studio ESP32-S3-N16R8** that runs a Discord bot on the chip. It joins Wi‑Fi and the Discord Gateway, reads sensors, drives GPIO from chat, and shows a live dashboard on a **128×128 SSD1327** OLED.
 
-![MiniMe ESP32-S3 breadboard prototype with SSD1327 OLED](docs/minime-breadboard.png)
+![MiniMe ESP32-S3 breadboard prototype with SSD1327 OLED and touch pad](docs/minime-breadboard.png)
 
-*Breadboard prototype: WeAct Studio ESP32-S3-N16R8, 128×128 SSD1327 (GND / VCC / SCL / SDA), and two discrete LEDs.*
+*Breadboard prototype: WeAct Studio ESP32-S3-N16R8, 128×128 SSD1327 (GND / VCC / SCL / SDA), two discrete LEDs, and GPIO 4 touch wake pad (yellow wire loop). DS18B20 temperature sensor not wired yet — OLED shows `Temp: -- sensor --`.*
 
 Current version: see `VERSION` and `CHANGELOG.md`.
 
