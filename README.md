@@ -44,7 +44,7 @@ Sent to `TARGET_CHANNEL_ID` (no command needed):
 
 ### Bot Discord presence
 
-MiniMe’s own Discord status (green Online / yellow Idle), not the OLED user rows:
+MiniMe’s own Discord status (green Online / yellow Idle) in Discord:
 
 - Starts **Online** when the Gateway identifies
 - Goes **Idle** after **5 minutes** with no activity
