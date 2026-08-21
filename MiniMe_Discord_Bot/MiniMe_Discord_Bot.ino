@@ -587,7 +587,7 @@ void showTransient(const String& line1, const String& line2 = "", const String& 
 //   Row 11 y=87  User6
 //   Row 12 y=95  User7
 //   Row 13 y=103 User8
-//   Row 14 y=111 (open)
+//   Row 14 y=111 Bot:Online/Idle (left, 10) + Www Mmm dd YYYY (right, 15; fixed slot)
 //   Row 15 y=119 command / !display text (blank when idle)
 //   Row 16 y=127 command / !display text (blank when idle)
 void drawDashboard() {
@@ -660,7 +660,7 @@ void drawDashboard() {
   }
   u8g2.drawStr(0, 39, upTempBuf);
 
-  // ---- Rows 6-13: eight user stats (5x7 + 1px pad = 8px rows); row 14 left open ----
+  // ---- Rows 6-13: eight user stats (5x7 + 1px pad = 8px rows) ----
   // Name left, status after the longest name, Bot:N right-justified. Empty slots show ---.
   u8g2.setFont(u8g2_font_5x7_tf);
   const int gapPx = 4;
@@ -686,7 +686,7 @@ void drawDashboard() {
   int statusX = longestNamePx + gapPx;
 
   for (uint8_t row = 0; row < MAX_TRACKED_USERS; row++) {
-    uint8_t y = 47 + (row * 8); // baseline: 47, 55, 63, 71, 79, 87, 95, 103 (row 14 open)
+    uint8_t y = 47 + (row * 8); // baseline: 47, 55, 63, 71, 79, 87, 95, 103
     String name = names[row];
     while (name.length() > 1 && u8g2.getStrWidth(name.c_str()) > longestNamePx) {
       name.remove(name.length() - 1);
@@ -701,6 +701,31 @@ void drawDashboard() {
     int botX = 128 - u8g2.getStrWidth(botStr.c_str());
     if (botX < statusX + statusW + 2) botX = statusX + statusW + 2;
     u8g2.drawStr(botX, y, botStr.c_str());
+  }
+
+  // ---- Row 14: Bot Online/Idle left; DOW Mon day year right (fixed widths, no shifting) ----
+  // 25 chars total: "Bot:Online" (10) + "Thu Aug 20 2026" (15). Day space-padded (%2d).
+  {
+    static const char* const DOW_NAME[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    static const char* const MON_NAME[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                           "Jul","Aug","Sep","Oct","Nov","Dec"};
+    time_t localEpoch = (time_t)timeClient.getEpochTime();
+    struct tm tmLocal;
+    gmtime_r(&localEpoch, &tmLocal);
+    char botBuf[12];
+    snprintf(botBuf, sizeof(botBuf), "Bot:%-6s",
+             (botDiscordStatus == 2) ? "Online" : "Idle");
+    u8g2.drawStr(0, 111, botBuf);
+
+    char dateBuf[20];
+    snprintf(dateBuf, sizeof(dateBuf), "%s %s %2d %04d",
+             DOW_NAME[tmLocal.tm_wday], MON_NAME[tmLocal.tm_mon],
+             tmLocal.tm_mday, tmLocal.tm_year + 1900);
+    // Right-justify against a constant slot width so DOW never moves.
+    const char* dateSlot = "Www Mmm 99 9999";
+    int dateX = 128 - u8g2.getStrWidth(dateSlot);
+    if (dateX < 0) dateX = 0;
+    u8g2.drawStr(dateX, 111, dateBuf);
   }
 
   u8g2.setFont(u8g2_font_5x7_tf);

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.10
+
+- OLED row 14: `Bot:Online` / `Bot:Idle  ` left; fixed-slot `Www Mmm dd YYYY` right (space-padded day, DOW does not shift).
+
 ## 0.4.9
 
 - Restore command handling that had regressed: lowercase the command word only (args like `!display` text keep their case).
