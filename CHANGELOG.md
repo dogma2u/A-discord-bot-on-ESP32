@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.9
+
+- Restore command handling that had regressed: lowercase the command word only (args like `!display` text keep their case).
+- Unknown `!` commands reply `That is not a command.` (normal chat without `!` is ignored).
+- `!weather` accepts only a 5-digit US ZIP; anything else returns `Invalid ZIP code.`
+
 ## 0.4.8
 
 - OLED row 5 combines uptime and temp as fixed-width `Up:xxxxdxxhxxm T:xxxF/xxxC` (space-padded; sensor fail shows `T:--Error--`).

@@ -1686,20 +1686,26 @@ void handleCommand(const String& content, const String& authorId, const String& 
   if (!isDM && channelId != TARGET_CHANNEL_ID && channelId != TARGET_CHANNEL_ID1) {
     return;
   }
+  String raw = content;
+  raw.trim();
+  if (!raw.startsWith("!")) return; // normal chat — ignore
+
   noteBotActivity();
-  String cmd = content;
-  cmd.trim();
+  int spIdx = raw.indexOf(' ');
+  String cmdWord = (spIdx > 0) ? raw.substring(0, spIdx) : raw;
+  String args = (spIdx > 0) ? raw.substring(spIdx + 1) : "";
+  cmdWord.toLowerCase(); // command only — leave args as typed
+  args.trim();
 
   // Extract command name for the dashboard (first word, max 14 chars)
-  int spIdx = cmd.indexOf(' ');
-  dashLastCmd = (spIdx > 0) ? cmd.substring(0, spIdx) : cmd;
+  dashLastCmd = cmdWord;
   if (dashLastCmd.length() > 14) dashLastCmd = dashLastCmd.substring(0, 14);
   dashLastCmdMillis = millis();
 
   // Count this command usage for dashboard (reset happens every 24h).
   recordUserUse(authorId, authorName);
 
-  if (cmd.startsWith("!help")) {
+  if (cmdWord == "!help") {
     String helpMsg =
       "🤖 **MiniMe Bot Commands**\n\n"
       "**👤 Public Commands:**\n"
@@ -1724,15 +1730,20 @@ void handleCommand(const String& content, const String& authorId, const String& 
     showTransient("Help", "Command Sent");
     return;
   }
-  if (cmd.startsWith("!weather")) {
-    int spaceIdx = cmd.indexOf(' ');
-    if (spaceIdx < 0) {
+  if (cmdWord == "!weather") {
+    if (args.length() == 0) {
       sendDiscordMessage(channelId, "Usage: !weather <zip>");
       return;
     }
-    String zip = cmd.substring(spaceIdx + 1);
-    zip.trim();
-    if (zip.length() < 5) {
+    String zip = args;
+    bool validZip = (zip.length() == 5);
+    if (validZip) {
+      for (unsigned i = 0; i < 5; i++) {
+        char c = zip.charAt(i);
+        if (c < '0' || c > '9') { validZip = false; break; }
+      }
+    }
+    if (!validZip) {
       sendDiscordMessage(channelId, "Invalid ZIP code.");
       return;
     }
@@ -1749,7 +1760,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
     }
     return;
   }
-  if (cmd.startsWith("!news")) {
+  if (cmdWord == "!news") {
     String report;
     showTransient("News", "Fetching...");
     if (getScienceNews(report)) {
@@ -1763,7 +1774,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
     }
     return;
   }
-  if (cmd.startsWith("!physics")) {
+  if (cmdWord == "!physics") {
     String report;
     showTransient("Physics", "Fetching arXiv...");
     if (getPhysicsPapers(report)) {
@@ -1777,7 +1788,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
     }
     return;
   }
-  if (cmd.startsWith("!apod")) {
+  if (cmdWord == "!apod") {
     String report;
     showTransient("APOD", "Fetching NASA...");
     if (getApod(report)) {
@@ -1791,7 +1802,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
     }
     return;
   }
-  if (cmd.startsWith("!iss")) {
+  if (cmdWord == "!iss") {
     String report;
     showTransient("ISS", "Fetching...");
     if (getIssPosition(report)) {
@@ -1805,7 +1816,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
     }
     return;
   }
-  if (cmd.startsWith("!temp")) {
+  if (cmdWord == "!temp") {
     float c, f;
     if (readTemperature(c, f)) {
       dashTempC = c;
@@ -1821,13 +1832,13 @@ void handleCommand(const String& content, const String& authorId, const String& 
     }
     return;
   }
-  if (cmd.startsWith("!sysinfo")) {
+  if (cmdWord == "!sysinfo") {
     sendDiscordMessage(channelId, getSystemInfo(), true);
     dashLastEvent = "SysInfo sent";
     showTransient("SysInfo", "Sent");
     return;
   }
-  if (cmd.startsWith("!time")) {
+  if (cmdWord == "!time") {
     updateLocalTime();
     String currentTime = timeClient.getFormattedTime();
     String msg = "🕒 Current Bot Time: " + currentTime;
@@ -1836,9 +1847,8 @@ void handleCommand(const String& content, const String& authorId, const String& 
     showTransient("Time", currentTime);
     return;
   }
-  if (cmd.startsWith("!ask")) {
-    int spaceIdx = cmd.indexOf(' ');
-    if (spaceIdx < 0) {
+  if (cmdWord == "!ask") {
+    if (args.length() == 0) {
       sendDiscordMessage(channelId, "Usage: !ask <question>");
       return;
     }
@@ -1846,12 +1856,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
       sendDiscordMessage(channelId, "DeepSeek is already answering. Try again in a moment.");
       return;
     }
-    String question = cmd.substring(spaceIdx + 1);
-    question.trim();
-    if (question.length() == 0) {
-      sendDiscordMessage(channelId, "Usage: !ask <question>");
-      return;
-    }
+    String question = args;
     askPendingQuestion = question;
     askPendingChannelId = channelId;
     askNeedPost = true;
@@ -1860,14 +1865,12 @@ void handleCommand(const String& content, const String& authorId, const String& 
     // Serial.println("[ASK] queued (HTTPS from loop)");
     return;
   }
-  if (cmd.startsWith("!display")) {
-    int spaceIdx = cmd.indexOf(' ');
-    if (spaceIdx < 0) {
+  if (cmdWord == "!display") {
+    if (args.length() == 0) {
       sendDiscordMessage(channelId, "Usage: !display <text>");
       return;
     }
-    String text = cmd.substring(spaceIdx + 1);
-    text.trim();
+    String text = args;
     if (text.length() > 50) text = text.substring(0, 50);
     String line15 = text.substring(0, text.length() > 25 ? 25 : text.length());
     String line16 = text.length() > 25 ? text.substring(25) : "";
@@ -1877,82 +1880,91 @@ void handleCommand(const String& content, const String& authorId, const String& 
     return;
   }
   // Owner-only hardware: LED, set1/set2, servo.
-  if (!isOwner(authorId)) {
-    if (!isDM) {
-      sendDiscordMessage(channelId, "You are not allowed to use this command.");
+  if (cmdWord == "!led" || cmdWord == "!set1" || cmdWord == "!set2" || cmdWord == "!servo") {
+    if (!isOwner(authorId)) {
+      if (!isDM) {
+        sendDiscordMessage(channelId, "You are not allowed to use this command.");
+      }
+      return;
     }
-    return;
-  }
-  if (cmd.startsWith("!led")) {
-    if (cmd.indexOf("on") > 0) {
+    if (cmdWord == "!led") {
+      String a = args;
+      a.toLowerCase();
+      if (a == "on") {
         pixels.setPixelColor(0, pixels.Color(255, 255, 255));
         pixels.show();
         sendDiscordMessage(channelId, "LED ON");
         dashLastEvent = "LED ON";
         showTransient("LED", "ON");
-    } else if (cmd.indexOf("off") > 0) {
+      } else if (a == "off") {
         pixels.setPixelColor(0, pixels.Color(0, 0, 0));
         pixels.show();
         sendDiscordMessage(channelId, "LED OFF");
         dashLastEvent = "LED OFF";
         showTransient("LED", "OFF");
-    } else {
+      } else {
         sendDiscordMessage(channelId, "Usage: !led on/off");
-    }
-    return;
-  }
-  if (cmd.startsWith("!set1")) {
-    if (cmd.indexOf("on") > 0) {
-      digitalWrite(PIN_SET1, HIGH);
-      sendDiscordMessage(channelId, "set1 ON");
-      dashLastEvent = "set1 ON";
-      showTransient("set1", "ON");
-    } else if (cmd.indexOf("off") > 0) {
-      digitalWrite(PIN_SET1, LOW);
-      sendDiscordMessage(channelId, "set1 OFF");
-      dashLastEvent = "set1 OFF";
-      showTransient("set1", "OFF");
-    } else {
-      sendDiscordMessage(channelId, "Usage: !set1 on/off");
-    }
-    return;
-  }
-  if (cmd.startsWith("!set2")) {
-    if (cmd.indexOf("on") > 0) {
-      digitalWrite(PIN_SET2, HIGH);
-      sendDiscordMessage(channelId, "set2 ON");
-      dashLastEvent = "set2 ON";
-      showTransient("set2", "ON");
-    } else if (cmd.indexOf("off") > 0) {
-      digitalWrite(PIN_SET2, LOW);
-      sendDiscordMessage(channelId, "set2 OFF");
-      dashLastEvent = "set2 OFF";
-      showTransient("set2", "OFF");
-    } else {
-      sendDiscordMessage(channelId, "Usage: !set2 on/off");
-    }
-    return;
-  }
-  if (cmd.startsWith("!servo")) {
-    int spaceIdx = cmd.indexOf(' ');
-    if (spaceIdx < 0) {
-      sendDiscordMessage(channelId, "Usage: !servo <0-90>");
+      }
       return;
     }
-    String arg = cmd.substring(spaceIdx + 1);
-    arg.trim();
-    int angle = arg.toInt();
-    if (angle < 0 || angle > 90) {
-      sendDiscordMessage(channelId, "Angle out of range. Allowed: 0-90 degrees.");
+    if (cmdWord == "!set1") {
+      String a = args;
+      a.toLowerCase();
+      if (a == "on") {
+        digitalWrite(PIN_SET1, HIGH);
+        sendDiscordMessage(channelId, "set1 ON");
+        dashLastEvent = "set1 ON";
+        showTransient("set1", "ON");
+      } else if (a == "off") {
+        digitalWrite(PIN_SET1, LOW);
+        sendDiscordMessage(channelId, "set1 OFF");
+        dashLastEvent = "set1 OFF";
+        showTransient("set1", "OFF");
+      } else {
+        sendDiscordMessage(channelId, "Usage: !set1 on/off");
+      }
       return;
     }
-    setServoAngle(angle);
-    String msg = "Servo set to " + String(angle) + " degrees.";
-    sendDiscordMessage(channelId, msg);
-    dashLastEvent = "Servo " + String(angle) + "deg";
-    showTransient("Servo", String(angle) + " deg");
-    return;
+    if (cmdWord == "!set2") {
+      String a = args;
+      a.toLowerCase();
+      if (a == "on") {
+        digitalWrite(PIN_SET2, HIGH);
+        sendDiscordMessage(channelId, "set2 ON");
+        dashLastEvent = "set2 ON";
+        showTransient("set2", "ON");
+      } else if (a == "off") {
+        digitalWrite(PIN_SET2, LOW);
+        sendDiscordMessage(channelId, "set2 OFF");
+        dashLastEvent = "set2 OFF";
+        showTransient("set2", "OFF");
+      } else {
+        sendDiscordMessage(channelId, "Usage: !set2 on/off");
+      }
+      return;
+    }
+    if (cmdWord == "!servo") {
+      if (args.length() == 0) {
+        sendDiscordMessage(channelId, "Usage: !servo <0-90>");
+        return;
+      }
+      int angle = args.toInt();
+      if (angle < 0 || angle > 90) {
+        sendDiscordMessage(channelId, "Angle out of range. Allowed: 0-90 degrees.");
+        return;
+      }
+      setServoAngle(angle);
+      String msg = "Servo set to " + String(angle) + " degrees.";
+      sendDiscordMessage(channelId, msg);
+      dashLastEvent = "Servo " + String(angle) + "deg";
+      showTransient("Servo", String(angle) + " deg");
+      return;
+    }
   }
+
+  sendDiscordMessage(channelId, "That is not a command.");
+  dashLastEvent = "Unknown cmd";
+  showTransient("Unknown", cmdWord);
 }
 // ====== DISCORD GATEWAY WEBSOCKET ======
 // HELLO -> IDENTIFY; READY / GUILD_* / PRESENCE_UPDATE for OLED; MESSAGE_CREATE -> handleCommand.
