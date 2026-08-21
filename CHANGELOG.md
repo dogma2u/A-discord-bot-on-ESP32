@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.8
+
+- OLED row 5 combines uptime and temp as fixed-width `Up:xxxxdxxhxxm T:xxxF/xxxC` (space-padded; sensor fail shows `T:--Error--`).
+- User rows shift up to rows 6–13; row 14 left open.
+
 ## 0.4.7
 
 - Fix `!ask` silent failures: Discord 2000-char post limit, larger REST JSON buffer, HTTP status check, HTTPS busy lock while DeepSeek runs, short fallback if the reply post fails.

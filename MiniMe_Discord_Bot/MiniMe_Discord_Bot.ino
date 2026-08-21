@@ -578,16 +578,16 @@ void showTransient(const String& line1, const String& line2 = "", const String& 
 //   Row 2  y=15  Sig bar
 //   Row 3  y=23  Heap bar
 //   Row 4  y=31  Srv bar (0-90 deg)
-//   Row 5  y=39  Temp: xx.xF / xx.xC
-//   Row 6  y=47  Up Time: XdXhXm
-//   Row 7  y=55  User1
-//   Row 8  y=63  User2
-//   Row 9  y=71  User3
-//   Row 10 y=79  User4
-//   Row 11 y=87  User5
-//   Row 12 y=95  User6
-//   Row 13 y=103 User7
-//   Row 14 y=111 User8
+//   Row 5  y=39  Up:xxxxdxxhxxm T:xxxF/xxxC  (or T:--Error--; space-padded)
+//   Row 6  y=47  User1
+//   Row 7  y=55  User2
+//   Row 8  y=63  User3
+//   Row 9  y=71  User4
+//   Row 10 y=79  User5
+//   Row 11 y=87  User6
+//   Row 12 y=95  User7
+//   Row 13 y=103 User8
+//   Row 14 y=111 (open)
 //   Row 15 y=119 command / !display text (blank when idle)
 //   Row 16 y=127 command / !display text (blank when idle)
 void drawDashboard() {
@@ -645,26 +645,22 @@ void drawDashboard() {
   u8g2.drawFrame(25, 24, 103, 8);
   if (srvBarW > 0) u8g2.drawBox(26, 25, srvBarW, 6);
 
-  // ---- Row 5: Temp ----
-  u8g2.drawStr(0, 39, "Temp:");
-  if (dashTempC > -998.0f) {
-    char buf[28];
-    snprintf(buf, sizeof(buf), "%.1fF / %.1fC", dashTempF, dashTempC);
-    u8g2.drawStr(31, 39, buf);
-  } else {
-    u8g2.drawStr(31, 39, "-- sensor --");
-  }
-
-  // ---- Row 6: Up Time ----
+  // ---- Row 5: Up + Temp — Up:xxxxdxxhxxm T:xxxF/xxxC (space-pad, no leading zeros) ----
   unsigned long uptimeSec = millis() / 1000;
   unsigned long d = uptimeSec / 86400;
   unsigned long h = (uptimeSec % 86400) / 3600;
   unsigned long m = (uptimeSec % 3600) / 60;
-  char upBuf[24];
-  snprintf(upBuf, sizeof(upBuf), "Up Time:%lud%luh%lum", d, h, m);
-  u8g2.drawStr(0, 47, upBuf);
+  if (d > 9999) d = 9999;
+  char upTempBuf[32];
+  if (dashTempC > -998.0f) {
+    snprintf(upTempBuf, sizeof(upTempBuf), "Up:%4lud%2luh%2lum T:%3.0fF/%3.0fC",
+             d, h, m, dashTempF, dashTempC);
+  } else {
+    snprintf(upTempBuf, sizeof(upTempBuf), "Up:%4lud%2luh%2lum T:--Error--", d, h, m);
+  }
+  u8g2.drawStr(0, 39, upTempBuf);
 
-  // ---- Rows 7-14: eight user stats (5x7 + 1px pad = 8px rows) ----
+  // ---- Rows 6-13: eight user stats (5x7 + 1px pad = 8px rows); row 14 left open ----
   // Name left, status after the longest name, Bot:N right-justified. Empty slots show ---.
   u8g2.setFont(u8g2_font_5x7_tf);
   const int gapPx = 4;
@@ -690,7 +686,7 @@ void drawDashboard() {
   int statusX = longestNamePx + gapPx;
 
   for (uint8_t row = 0; row < MAX_TRACKED_USERS; row++) {
-    uint8_t y = 55 + (row * 8); // baseline: 55, 63, 71, 79, 87, 95, 103, 111
+    uint8_t y = 47 + (row * 8); // baseline: 47, 55, 63, 71, 79, 87, 95, 103 (row 14 open)
     String name = names[row];
     while (name.length() > 1 && u8g2.getStrWidth(name.c_str()) > longestNamePx) {
       name.remove(name.length() - 1);

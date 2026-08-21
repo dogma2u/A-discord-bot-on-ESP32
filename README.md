@@ -72,9 +72,9 @@ Font is **5×7** with 1px padding (**8px** per row). U8g2 `drawStr(x, y)` uses *
 | 2 | 15 | `Sig:` Wi‑Fi RSSI bar |
 | 3 | 23 | `Heap:` free memory bar (internal SRAM + 8MB PSRAM) |
 | 4 | 31 | `Srv:` servo position bar, **0–90°** (boot commands **45°**, half fill) |
-| 5 | 39 | `Temp:` DS18B20, or `-- sensor --` if missing |
-| 6 | 47 | `Up Time:` days / hours / minutes |
-| 7–14 | 55 + row×8 … 111 | Eight user rows: name, `On` / `Idle` / `DND` / `Off`, `Bot:N` (commands in the last 24 hours) |
+| 5 | 39 | `Up:xxxxdxxhxxm T:xxxF/xxxC` (space-padded); sensor fail: `T:--Error--` |
+| 6–13 | 47 + row×8 … 103 | Eight user rows: name, `On` / `Idle` / `DND` / `Off`, `Bot:N` (commands in the last 24 hours) |
+| 14 | 111 | Open (blank) |
 | 15–16 | 119 / 127 | Command / action text, or `!display` payload. **Blank when idle** |
 
 Empty user slots show `---`. Names come from a startup REST member fetch (nick → global name → username), up to **eight** members. Presence updates from the Gateway. Command counts reset every 24 hours.
