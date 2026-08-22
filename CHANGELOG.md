@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.12
+
+- Commands may appear anywhere in a message (e.g. `Should I !ask what time is it.`); they are handled the same as if they started the line.
+
+## 0.4.11
+
+- Touch pad still wakes the OLED; it no longer sets Discord presence to Online.
+
 ## 0.4.10
 
 - OLED row 14: `Bot:Online` / `Bot:Idle  ` left; fixed-slot `Www Mmm dd YYYY` right (space-padded day, DOW does not shift).

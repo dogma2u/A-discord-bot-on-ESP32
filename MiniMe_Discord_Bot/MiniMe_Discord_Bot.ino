@@ -28,7 +28,7 @@
  7) Gateway websocket, bot Online/Idle presence, scheduled posts, setup / loop
  Display sleep dims then blanks the OLED only. ESP32 and Wi-Fi stay running.
  Touch on GPIO 4 wakes the panel with the same on/dim/off timing.
- Bot Discord status: online on activity/touch; idle after 5 minutes quiet.
+ Bot Discord status: online on activity; idle after 5 minutes quiet. Touch does not set Online.
 */
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -531,7 +531,6 @@ void pollTouchWake() {
   touchWakePending = false;
   lastTouchWakeMillis = now;
   noteDisplayActivity();
-  noteBotActivity(); // touch also sets Discord Online
 }
 
 // After 1 minute idle, dim over 15 s, then blank the OLED. Clock/RSSI/heap ticks do not count.
@@ -575,19 +574,19 @@ void showTransient(const String& line1, const String& line2 = "", const String& 
 // Grid: 16 rows x 18 chars on 128x128
 // Row baselines (y = row*8, glyph baseline at y+7):
 //   Row 0  y=7   Header: MiniMe + GW:good/bad + right-justified time
-//   Row 2  y=15  Sig bar
-//   Row 3  y=23  Heap bar
-//   Row 4  y=31  Srv bar (0-90 deg)
-//   Row 5  y=39  Up:xxxxdxxhxxm T:xxxF/xxxC  (or T:--Error--; space-padded)
-//   Row 6  y=47  User1
-//   Row 7  y=55  User2
-//   Row 8  y=63  User3
-//   Row 9  y=71  User4
-//   Row 10 y=79  User5
-//   Row 11 y=87  User6
-//   Row 12 y=95  User7
-//   Row 13 y=103 User8
-//   Row 14 y=111 Bot:Online/Idle (left, 10) + Www Mmm dd YYYY (right, 15; fixed slot)
+//   Row 2  y=15  Bot:Online/Idle (left, 10) + Www Mmm dd YYYY (right, 15; fixed slot)
+//   Row 3  y=23  Sig bar
+//   Row 4  y=31  Heap bar
+//   Row 5  y=39  Srv bar (0-90 deg)
+//   Row 6  y=47  Up:xxxxdxxhxxm T:xxxF/xxxC  (or T:--Error--; space-padded)
+//   Row 7  y=55  User1
+//   Row 8  y=63  User2
+//   Row 9  y=71  User3
+//   Row 10 y=79  User4
+//   Row 11 y=87  User5
+//   Row 12 y=95  User6
+//   Row 13 y=103 User7
+//   Row 14 y=111 User8
 //   Row 15 y=119 command / !display text (blank when idle)
 //   Row 16 y=127 command / !display text (blank when idle)
 void drawDashboard() {
@@ -605,21 +604,46 @@ void drawDashboard() {
   if (timeX < 0) timeX = 0;
   u8g2.drawStr(timeX, 7, t.c_str());
 
-  // ---- Rows 2-3: Signal + Heap bars ----
+  // ---- Row 2: Bot Online/Idle left; DOW Mon day year right (fixed widths, no shifting) ----
+  // 25 chars total: "Bot:Online" (10) + "Thu Aug 20 2026" (15). Day space-padded (%2d).
+  {
+    static const char* const DOW_NAME[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    static const char* const MON_NAME[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                           "Jul","Aug","Sep","Oct","Nov","Dec"};
+    time_t localEpoch = (time_t)timeClient.getEpochTime();
+    struct tm tmLocal;
+    gmtime_r(&localEpoch, &tmLocal);
+    char botBuf[12];
+    snprintf(botBuf, sizeof(botBuf), "Bot:%-6s",
+             (botDiscordStatus == 2) ? "Online" : "Idle");
+    u8g2.drawStr(0, 15, botBuf);
+
+    char dateBuf[20];
+    snprintf(dateBuf, sizeof(dateBuf), "%s %s %2d %04d",
+             DOW_NAME[tmLocal.tm_wday], MON_NAME[tmLocal.tm_mon],
+             tmLocal.tm_mday, tmLocal.tm_year + 1900);
+    // Right-justify against a constant slot width so DOW never moves.
+    const char* dateSlot = "Www Mmm 99 9999";
+    int dateX = 128 - u8g2.getStrWidth(dateSlot);
+    if (dateX < 0) dateX = 0;
+    u8g2.drawStr(dateX, 15, dateBuf);
+  }
+
+  // ---- Rows 3-4: Signal + Heap bars ----
   long rssi = WiFi.RSSI();
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t totalHeap = ESP.getHeapSize();
 
-  // Signal bar (row 2)
+  // Signal bar (row 3)
   int sigBarW = 0;
   if (rssi >= -40) sigBarW = 79;
   else if (rssi <= -100) sigBarW = 0;
   else sigBarW = (int)((rssi + 100) * 79 / 60);
-  u8g2.drawStr(0, 15, "Sig:");
-  u8g2.drawFrame(25, 8, 103, 8);
-  if (sigBarW > 0) u8g2.drawBox(26, 9, sigBarW, 6);
+  u8g2.drawStr(0, 23, "Sig:");
+  u8g2.drawFrame(25, 16, 103, 8);
+  if (sigBarW > 0) u8g2.drawBox(26, 17, sigBarW, 6);
 
-  // Heap bar (row 3) — internal SRAM + this board's 8MB PSRAM, original 8px height
+  // Heap bar (row 4) — internal SRAM + this board's 8MB PSRAM, original 8px height
   uint32_t psramSize = ESP.getPsramSize();
   uint32_t psramFree = ESP.getFreePsram();
   if (psramSize < BOARD_PSRAM_BYTES) psramSize = BOARD_PSRAM_BYTES;
@@ -632,20 +656,20 @@ void drawDashboard() {
     if (heapBarW < 0) heapBarW = 0;
     if (heapBarW > 79) heapBarW = 79;
   }
-  u8g2.drawStr(0, 23, "Heap:");
-  u8g2.drawFrame(25, 16, 103, 8);
-  if (heapBarW > 0) u8g2.drawBox(26, 17, heapBarW, 6);
+  u8g2.drawStr(0, 31, "Heap:");
+  u8g2.drawFrame(25, 24, 103, 8);
+  if (heapBarW > 0) u8g2.drawBox(26, 25, heapBarW, 6);
 
-  // Servo bar (row 4) — last !servo angle 0-90, fill matches inner frame (101px)
+  // Servo bar (row 5) — last !servo angle 0-90, fill matches inner frame (101px)
   const int srvInnerW = 101;
   int srvBarW = (lastServoDeg * srvInnerW) / 90;
   if (srvBarW < 0) srvBarW = 0;
   if (srvBarW > srvInnerW) srvBarW = srvInnerW;
-  u8g2.drawStr(0, 31, "Srv:");
-  u8g2.drawFrame(25, 24, 103, 8);
-  if (srvBarW > 0) u8g2.drawBox(26, 25, srvBarW, 6);
+  u8g2.drawStr(0, 39, "Srv:");
+  u8g2.drawFrame(25, 32, 103, 8);
+  if (srvBarW > 0) u8g2.drawBox(26, 33, srvBarW, 6);
 
-  // ---- Row 5: Up + Temp — Up:xxxxdxxhxxm T:xxxF/xxxC (space-pad, no leading zeros) ----
+  // ---- Row 6: Up + Temp — Up:xxxxdxxhxxm T:xxxF/xxxC (space-pad, no leading zeros) ----
   unsigned long uptimeSec = millis() / 1000;
   unsigned long d = uptimeSec / 86400;
   unsigned long h = (uptimeSec % 86400) / 3600;
@@ -658,9 +682,9 @@ void drawDashboard() {
   } else {
     snprintf(upTempBuf, sizeof(upTempBuf), "Up:%4lud%2luh%2lum T:--Error--", d, h, m);
   }
-  u8g2.drawStr(0, 39, upTempBuf);
+  u8g2.drawStr(0, 47, upTempBuf);
 
-  // ---- Rows 6-13: eight user stats (5x7 + 1px pad = 8px rows) ----
+  // ---- Rows 7-14: eight user stats (5x7 + 1px pad = 8px rows) ----
   // Name left, status after the longest name, Bot:N right-justified. Empty slots show ---.
   u8g2.setFont(u8g2_font_5x7_tf);
   const int gapPx = 4;
@@ -686,7 +710,7 @@ void drawDashboard() {
   int statusX = longestNamePx + gapPx;
 
   for (uint8_t row = 0; row < MAX_TRACKED_USERS; row++) {
-    uint8_t y = 47 + (row * 8); // baseline: 47, 55, 63, 71, 79, 87, 95, 103
+    uint8_t y = 55 + (row * 8); // baseline: 55, 63, 71, 79, 87, 95, 103, 111
     String name = names[row];
     while (name.length() > 1 && u8g2.getStrWidth(name.c_str()) > longestNamePx) {
       name.remove(name.length() - 1);
@@ -701,31 +725,6 @@ void drawDashboard() {
     int botX = 128 - u8g2.getStrWidth(botStr.c_str());
     if (botX < statusX + statusW + 2) botX = statusX + statusW + 2;
     u8g2.drawStr(botX, y, botStr.c_str());
-  }
-
-  // ---- Row 14: Bot Online/Idle left; DOW Mon day year right (fixed widths, no shifting) ----
-  // 25 chars total: "Bot:Online" (10) + "Thu Aug 20 2026" (15). Day space-padded (%2d).
-  {
-    static const char* const DOW_NAME[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
-    static const char* const MON_NAME[] = {"Jan","Feb","Mar","Apr","May","Jun",
-                                           "Jul","Aug","Sep","Oct","Nov","Dec"};
-    time_t localEpoch = (time_t)timeClient.getEpochTime();
-    struct tm tmLocal;
-    gmtime_r(&localEpoch, &tmLocal);
-    char botBuf[12];
-    snprintf(botBuf, sizeof(botBuf), "Bot:%-6s",
-             (botDiscordStatus == 2) ? "Online" : "Idle");
-    u8g2.drawStr(0, 111, botBuf);
-
-    char dateBuf[20];
-    snprintf(dateBuf, sizeof(dateBuf), "%s %s %2d %04d",
-             DOW_NAME[tmLocal.tm_wday], MON_NAME[tmLocal.tm_mon],
-             tmLocal.tm_mday, tmLocal.tm_year + 1900);
-    // Right-justify against a constant slot width so DOW never moves.
-    const char* dateSlot = "Www Mmm 99 9999";
-    int dateX = 128 - u8g2.getStrWidth(dateSlot);
-    if (dateX < 0) dateX = 0;
-    u8g2.drawStr(dateX, 111, dateBuf);
   }
 
   u8g2.setFont(u8g2_font_5x7_tf);
@@ -1713,7 +1712,22 @@ void handleCommand(const String& content, const String& authorId, const String& 
   }
   String raw = content;
   raw.trim();
-  if (!raw.startsWith("!")) return; // normal chat — ignore
+  if (!raw.startsWith("!")) {
+    int bang = -1;
+    for (int i = 0; i < raw.length(); i++) {
+      if (raw.charAt(i) != '!') continue;
+      char next = (i + 1 < raw.length()) ? raw.charAt(i + 1) : 0;
+      if (!((next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z'))) continue;
+      if (i > 0) {
+        char prev = raw.charAt(i - 1);
+        if (prev != ' ' && prev != '\t' && prev != '\n') continue;
+      }
+      bang = i;
+      break;
+    }
+    if (bang < 0) return; // normal chat — ignore
+    raw = raw.substring(bang);
+  }
 
   noteBotActivity();
   int spIdx = raw.indexOf(' ');
