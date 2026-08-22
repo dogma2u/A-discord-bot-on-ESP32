@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.13
+
+- Mid-sentence one-word args work (`This is a test !led on of …` is `!led on`). `!ask` / `!display` still take the rest of the line.
+
 ## 0.4.12
 
 - Commands may appear anywhere in a message (e.g. `Should I !ask what time is it.`); they are handled the same as if they started the line.

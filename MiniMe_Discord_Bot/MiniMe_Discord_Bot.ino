@@ -1712,6 +1712,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
   }
   String raw = content;
   raw.trim();
+  bool midLine = false;
   if (!raw.startsWith("!")) {
     int bang = -1;
     for (int i = 0; i < raw.length(); i++) {
@@ -1727,6 +1728,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
     }
     if (bang < 0) return; // normal chat — ignore
     raw = raw.substring(bang);
+    midLine = true;
   }
 
   noteBotActivity();
@@ -1735,6 +1737,21 @@ void handleCommand(const String& content, const String& authorId, const String& 
   String args = (spIdx > 0) ? raw.substring(spIdx + 1) : "";
   cmdWord.toLowerCase(); // command only — leave args as typed
   args.trim();
+  // Mid-sentence: keep only the next word for one-word args (!led on, !weather zip, …).
+  // !ask / !display still use the rest of the line as the payload.
+  if (midLine && args.length() > 0 &&
+      cmdWord != "!ask" && cmdWord != "!display") {
+    int argSp = args.indexOf(' ');
+    if (argSp > 0) args = args.substring(0, argSp);
+    while (args.length() > 0) {
+      char last = args.charAt(args.length() - 1);
+      if (last == '.' || last == ',' || last == '!' || last == '?' || last == ';' || last == ':') {
+        args.remove(args.length() - 1);
+      } else {
+        break;
+      }
+    }
+  }
 
   // Extract command name for the dashboard (first word, max 14 chars)
   dashLastCmd = cmdWord;
