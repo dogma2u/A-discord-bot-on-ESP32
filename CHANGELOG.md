@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.22
+
+- Comment out Serial (test logging off). Touch trip gap remains 2000.
+
+## 0.4.21
+
+- Touch trip gap default is **2000**.
+
+## 0.4.20
+
+- CPU 80 MHz when OLED is off and Discord bot status is Idle; 240 MHz otherwise. Serial remains test-only.
+
+## 0.4.19
+
+- Serial: dedicated `usb power:` line with VBUS millivolts and volts (divider on GPIO 1).
+
+## 0.4.18
+
+- Serial 115200 on; touch init and raw/comp/idle/trip/usb/touched lines every 500 ms.
+
+## 0.4.17
+
+- README touch tuning: lower `TOUCH_THRESHOLD` if the pad is hard to trigger; raise it if it false-triggers.
+
+## 0.4.16
+
+- Touch trip gap default is **450** (was 3500) to match a ~400–500 raw delta on this pad.
+
+## 0.4.15
+
+- Touch cal: 16-sample rolling idle average; trip is a constant gap above that average. USB VBUS ADC on GPIO 1 (10k/10k divider) scales touch raw so USB voltage does not walk the trigger. `!sysinfo` shows VBUS mV and idle/trip.
+
 ## 0.4.14
 
 - Add `LICENSE` (MIT for original MiniMe files only; third-party libraries and APIs stay under their own terms). README points to it.

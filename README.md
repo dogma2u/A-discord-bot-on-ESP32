@@ -23,7 +23,7 @@ Same list Discord shows for `!help`:
 - `!iss` — International Space Station position
 - `!news` — space / high-tech headlines
 - `!physics` — latest arXiv physics papers
-- `!sysinfo` — uptime, free heap (internal + 8MB PSRAM), Wi‑Fi RSSI, gateway
+- `!sysinfo` — uptime, free heap (internal + 8MB PSRAM), Wi‑Fi RSSI, gateway, USB VBUS, touch idle/trip
 - `!temp` — indoor DS18B20 temperature
 - `!time` — bot local time (US Pacific, DST aware)
 - `!weather <zip>` — US ZIP weather (OpenWeatherMap)
@@ -240,6 +240,7 @@ Display: **SSD1327**, **128×128** pixels, I2C.
 | OLED SSD1327 (128×128) SDA | 8 |
 | OLED SSD1327 (128×128) SCL | 9 |
 | Touch wake pad | 4 |
+| USB VBUS ADC (divider) | 1 |
 
 OLED module labels: **GND, VCC, SCL, SDA**. The panel is **128×128**. Change pins in the sketch if your wiring differs.
 
@@ -258,23 +259,32 @@ The ESP32-S3 has a **built-in capacitive touch sensor** on **GPIO 4** (`TOUCH4`)
 3. **Ground reference:** a finger touching the pad (or a grounded metal bezel) completes the capacitive path. Mount the pad where you can reach it when the display is asleep.
 4. Keep the touch lead **short** and away from noisy switching loads (servo, NeoPixel) if possible. Long loose wires pick up noise and can false-trigger.
 
+### USB VBUS monitor (GPIO 1)
+
+USB port voltage moves the raw touch numbers. MiniMe reads VBUS through a **divider** and scales touch samples to the voltage measured at boot, so the trip gap stays constant.
+
+1. **Do not** connect USB 5V directly to GPIO 1 (max ~3.3 V on the pin).
+2. Wire: **USB 5V (VBUS)** → **10 kΩ** → **GPIO 1** → **10 kΩ** → **GND**.
+3. Change `PIN_USB_VBUS_ADC` / `USB_VBUS_R_HI` / `USB_VBUS_R_LO` in the sketch if your divider or pin differs.
+4. `!sysinfo` reports **USB VBUS** in millivolts (about **5000** with a 1:1 divider on a healthy 5 V port). An unwired pin will read junk; compensation is skipped if the reading is below **1000 mV**.
+
 ### How it works in firmware
 
 - **`PIN_TOUCH`** is **4** (change in the sketch if you use a different touch-capable GPIO).
-- At boot, **`setupTouch()`** runs **after Wi-Fi and I2C** so calibration is stable. It takes ~20 idle samples and stores the median as **`touchIdleMin`**.
-- A touch is detected when the raw reading rises above **`touchIdleMin + TOUCH_THRESHOLD`** (default **3500**). While idle, the firmware slowly tracks a lower baseline so drift does not block wakes.
+- At boot, **`setupTouch()`** runs **after Wi-Fi and I2C**. It samples USB VBUS, then fills a **16-sample rolling average** of voltage-compensated idle touch readings (`touchIdleAvg`).
+- Trip is always **`touchIdleAvg + TOUCH_THRESHOLD`** (default gap **2000**). Idle samples below trip keep updating the rolling window; a tap does not.
 - **`touchAttachInterrupt`** fires on touch; **`pollTouchWake()`** in `loop()` debounces (**300 ms**) and calls the same wake path as a Discord event (full contrast, 1-minute idle timer restarted).
 - Serial monitor **115200** prints debug every **500 ms**, for example:
   ```
-  touch GPIO4: raw=42000 idleMin=38000 trip=41500 touched=YES
+  touch GPIO4: raw=42000 comp=41800 idleAvg=38000 trip=41500 usbMv=4980 touched=YES
   ```
-  On boot you also see `--- touch init ---` with `idleMin` and `trip`.
+  On boot you also see `--- touch init ---` with `idleAvg`, `trip`, and `usbMv`.
 
 ### Tuning sensitivity
 
-If the pad is **hard to trigger**, increase **`TOUCH_THRESHOLD`** in the sketch (try **4500** or **5000**).
+If the pad is **hard to trigger**, decrease **`TOUCH_THRESHOLD`** in the sketch (try **300**).
 
-If it **false-triggers** or stays “touched” when idle, **decrease** the threshold (try **2500**) or use a **smaller pad**.
+If it **false-triggers** or stays “touched” when idle, **increase** the threshold (try **600** or **700**) or use a **smaller pad**.
 
 After changing the threshold, re-upload and watch Serial: tap the pad and confirm `touched=YES` only when you touch it, and `raw` rises clearly above `trip`.
 

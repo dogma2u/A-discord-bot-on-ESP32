@@ -24,7 +24,7 @@
  3) SSD1327 dashboard, sleep, overlays (U8g2 drawStr; y is font baseline)
  4) GPIO, servo, DS18B20, NeoPixel
  5) Discord REST, public HTTP APIs, command handler
- 6) Touch wake pad (GPIO 4 capacitive sensor)
+ 6) Touch wake pad (GPIO 4) + USB VBUS ADC (GPIO 1 divider)
  7) Gateway websocket, bot Online/Idle presence, scheduled posts, setup / loop
  Display sleep dims then blanks the OLED only. ESP32 and Wi-Fi stay running.
  Touch on GPIO 4 wakes the panel with the same on/dim/off timing.
@@ -74,8 +74,14 @@ const int PIN_DS18B20 = 10;
 const int PIN_I2C_SDA = 8;
 const int PIN_I2C_SCL = 9;
 const int PIN_TOUCH   = 4; // TOUCH4 — wire pad here
-const uint32_t TOUCH_THRESHOLD = 3500; // raw rise above idleMin (~5k seen on tap)
+const uint32_t TOUCH_THRESHOLD = 2000; // constant gap: trip = rolling idle avg + this
 const unsigned long TOUCH_DEBUG_MS = 500;
+// USB 5V (VBUS) → 10k → PIN_USB_VBUS_ADC → 10k → GND. Do not feed 5V straight into the pin.
+const int PIN_USB_VBUS_ADC = 1;
+const uint32_t USB_VBUS_R_HI = 10000; // ohms, 5V side
+const uint32_t USB_VBUS_R_LO = 10000; // ohms, GND side
+const uint8_t TOUCH_AVG_N = 16;       // rolling idle window
+const unsigned long USB_VBUS_READ_MS = 50;
 // ====== TIME CONFIG (NTP) — US Pacific, with daylight saving ======
 // NTP is fetched as UTC, then offset to PST or PDT for the dashboard clock and scheduled posts.
 WiFiUDP ntpUDP;
@@ -147,6 +153,8 @@ unsigned long lastBotActivityMillis = 0;
 const unsigned long BOT_PRESENCE_IDLE_MS = 300000UL; // 5 minutes quiet -> Idle
 uint8_t botDiscordStatus = 2; // 1=idle, 2=online
 bool botDiscordStatusSent = false;
+const uint32_t CPU_MHZ_ACTIVE = 240;
+const uint32_t CPU_MHZ_OLED_OFF_BOT_IDLE = 80;
 void noteBotActivity();
 void updateBotPresenceIdle();
 void sendBotPresence(const char* status, bool afk);
@@ -377,11 +385,18 @@ const unsigned long DASH_REFRESH_MS = 2000;
 unsigned long lastDisplayActivityMillis = 0;
 
 // ====== TOUCH WAKE (GPIO 4, capacitive pad) ======
-// Built-in ESP32-S3 touch on TOUCH4. Pad on PIN_TOUCH; raw above idleMin + threshold = tap.
+// Built-in ESP32-S3 touch on TOUCH4. Compensated raw vs rolling idle avg + constant gap.
 unsigned long lastTouchWakeMillis = 0;
 unsigned long lastTouchDebugMillis = 0;
-uint32_t touchIdleMin = 0;
+uint32_t touchIdleBuf[TOUCH_AVG_N];
+uint8_t touchIdleBufCount = 0;
+uint8_t touchIdleBufIdx = 0;
+uint32_t touchIdleSum = 0;
+uint32_t touchIdleAvg = 0;
 uint32_t touchRawMax = 0;
+uint32_t usbVbusRefMv = 0;
+uint32_t usbVbusMvCached = 0;
+unsigned long usbVbusLastReadMs = 0;
 volatile bool touchWakePending = false;
 bool displayAsleep = false;
 const unsigned long DISPLAY_IDLE_MS = 60000UL; // 1 minute full brightness
@@ -428,42 +443,75 @@ bool touchSampleValid(uint32_t raw) {
   return raw > 0 && raw < 150000;
 }
 
-// Boot: median of 20 idle samples → touchIdleMin (trip = idleMin + TOUCH_THRESHOLD).
-void calibrateTouchIdleMin() {
-  uint32_t samples[20];
-  uint8_t count = 0;
-  for (int i = 0; i < 20; i++) {
-    uint32_t raw = readTouchRaw(PIN_TOUCH);
-    if (touchSampleValid(raw)) samples[count++] = raw;
-    delay(25);
-  }
-  if (count == 0) {
-    touchIdleMin = readTouchRaw(PIN_TOUCH);
-    return;
-  }
-  for (uint8_t i = 0; i + 1 < count; i++) {
-    for (uint8_t j = i + 1; j < count; j++) {
-      if (samples[j] < samples[i]) {
-        uint32_t t = samples[i];
-        samples[i] = samples[j];
-        samples[j] = t;
-      }
-    }
-  }
-  touchIdleMin = samples[count / 2];
-  touchRawMax = touchIdleMin;
+uint32_t touchTripPoint() {
+  return touchIdleAvg + TOUCH_THRESHOLD;
 }
 
-// Slow drift tracking while not touched (keeps trip point stable over temperature/humidity).
-void updateTouchIdleMin(uint32_t raw) {
-  if (!touchSampleValid(raw)) return;
-  if (raw < touchIdleMin) {
-    touchIdleMin = raw;
-    return;
+uint32_t readUsbVbusMilliVolts() {
+  unsigned long now = millis();
+  if (usbVbusLastReadMs != 0 && (now - usbVbusLastReadMs) < USB_VBUS_READ_MS) {
+    return usbVbusMvCached;
   }
-  if (raw <= touchIdleMin + (TOUCH_THRESHOLD / 4)) {
-    touchIdleMin = (touchIdleMin * 31 + raw) / 32;
+  usbVbusLastReadMs = now;
+  uint32_t pinMv = analogReadMilliVolts((uint8_t)PIN_USB_VBUS_ADC);
+  usbVbusMvCached = (uint32_t)((uint64_t)pinMv * (USB_VBUS_R_HI + USB_VBUS_R_LO) / USB_VBUS_R_LO);
+  return usbVbusMvCached;
+}
+
+// Scale touch raw to boot-time USB voltage so VBUS sag/swell does not walk the gap.
+uint32_t compensateTouchRaw(uint32_t raw) {
+  uint32_t v = readUsbVbusMilliVolts();
+  if (usbVbusRefMv < 1000 || v < 1000) return raw;
+  return (uint32_t)((uint64_t)raw * usbVbusRefMv / v);
+}
+
+void setupUsbVbusAdc() {
+  analogSetPinAttenuation(PIN_USB_VBUS_ADC, ADC_11db);
+  pinMode(PIN_USB_VBUS_ADC, INPUT);
+  uint32_t acc = 0;
+  for (int i = 0; i < 8; i++) {
+    usbVbusLastReadMs = 0;
+    acc += readUsbVbusMilliVolts();
+    delay(10);
   }
+  usbVbusRefMv = acc / 8;
+}
+
+void touchIdlePush(uint32_t sample) {
+  if (touchIdleBufCount < TOUCH_AVG_N) {
+    touchIdleBuf[touchIdleBufCount++] = sample;
+    touchIdleSum += sample;
+  } else {
+    touchIdleSum -= touchIdleBuf[touchIdleBufIdx];
+    touchIdleBuf[touchIdleBufIdx] = sample;
+    touchIdleSum += sample;
+    touchIdleBufIdx = (uint8_t)((touchIdleBufIdx + 1) % TOUCH_AVG_N);
+  }
+  if (touchIdleBufCount > 0) touchIdleAvg = touchIdleSum / touchIdleBufCount;
+}
+
+void calibrateTouchIdleAvg() {
+  touchIdleBufCount = 0;
+  touchIdleBufIdx = 0;
+  touchIdleSum = 0;
+  touchIdleAvg = 0;
+  for (int i = 0; i < TOUCH_AVG_N; i++) {
+    uint32_t raw = readTouchRaw(PIN_TOUCH);
+    if (touchSampleValid(raw)) touchIdlePush(compensateTouchRaw(raw));
+    delay(25);
+  }
+  if (touchIdleBufCount == 0) {
+    uint32_t raw = readTouchRaw(PIN_TOUCH);
+    touchIdlePush(compensateTouchRaw(raw));
+  }
+  touchRawMax = touchIdleAvg;
+}
+
+// Rolling idle average while not touched. Trip stays avg + TOUCH_THRESHOLD.
+void updateTouchIdleAvg(uint32_t compensated) {
+  if (!touchSampleValid(compensated)) return;
+  if (compensated >= touchTripPoint()) return;
+  touchIdlePush(compensated);
 }
 
 void configureTouchHardware() {
@@ -477,16 +525,34 @@ void configureTouchHardware() {
 // Call once in setup() after WiFi/I2C — do not recalibrate earlier.
 void setupTouch() {
   // Serial.println("--- touch init ---");
+  setupUsbVbusAdc();
   configureTouchHardware();
-  calibrateTouchIdleMin();
+  calibrateTouchIdleAvg();
   touchDetachInterrupt(PIN_TOUCH);
   touchAttachInterrupt(PIN_TOUCH, onTouchWake, 0);
   // Serial.print("touch GPIO");
   // Serial.print(PIN_TOUCH);
-  // Serial.print(" idleMin=");
-  // Serial.print(touchIdleMin);
+  // Serial.print(" idleAvg=");
+  // Serial.print(touchIdleAvg);
   // Serial.print(" trip=");
-  // Serial.println(touchIdleMin + TOUCH_THRESHOLD);
+  // Serial.print(touchTripPoint());
+  // Serial.print(" usbMv=");
+  // Serial.println(usbVbusRefMv);
+  // printUsbVbusSerial();
+}
+
+void printUsbVbusSerial() {
+  uint32_t mv = readUsbVbusMilliVolts();
+  (void)mv;
+  // Serial.print("usb power: ");
+  // Serial.print(mv);
+  // Serial.print(" mV  ");
+  // Serial.print(mv / 1000);
+  // Serial.print(".");
+  // uint32_t hun = (mv % 1000) / 10;
+  // if (hun < 10) Serial.print("0");
+  // Serial.print(hun);
+  // Serial.println(" V");
 }
 
 void debugTouchSerial() {
@@ -495,31 +561,38 @@ void debugTouchSerial() {
   lastTouchDebugMillis = now;
 
   uint32_t raw = readTouchRaw(PIN_TOUCH);
-  uint32_t trip = touchIdleMin + TOUCH_THRESHOLD;
-  bool touched = raw >= trip;
+  uint32_t compensated = compensateTouchRaw(raw);
+  uint32_t trip = touchTripPoint();
+  bool touched = compensated >= trip;
 
-  if (!touched) updateTouchIdleMin(raw);
+  if (!touched) updateTouchIdleAvg(compensated);
   if (raw > touchRawMax) touchRawMax = raw;
 
   // Serial.print("touch GPIO");
   // Serial.print(PIN_TOUCH);
   // Serial.print(": raw=");
   // Serial.print(raw);
-  // Serial.print(" idleMin=");
-  // Serial.print(touchIdleMin);
+  // Serial.print(" comp=");
+  // Serial.print(compensated);
+  // Serial.print(" idleAvg=");
+  // Serial.print(touchIdleAvg);
   // Serial.print(" trip=");
   // Serial.print(trip);
+  // Serial.print(" usbMv=");
+  // Serial.print(readUsbVbusMilliVolts());
   // Serial.print(" touched=");
   // Serial.println(touched ? "YES" : "no");
+  // printUsbVbusSerial();
 }
 
 bool touchIsActive() {
   uint32_t raw = readTouchRaw(PIN_TOUCH);
-  if (raw >= touchIdleMin + TOUCH_THRESHOLD) return true;
+  uint32_t compensated = compensateTouchRaw(raw);
+  if (compensated >= touchTripPoint()) return true;
 #if SOC_TOUCH_SENSOR_VERSION == 2
   if (touchInterruptGetLastStatus(PIN_TOUCH)) return true;
 #endif
-  updateTouchIdleMin(raw);
+  updateTouchIdleAvg(compensated);
   return false;
 }
 
@@ -853,6 +926,9 @@ String getSystemInfo() {
          String((unsigned long)totalHeap) + " bytes\n"
          "• **WiFi RSSI:** " + String(rssi) + " dBm\n"
          "• **Gateway Status:** " + String((gatewayConnected && identified) ? "Connected" : "Disconnected") + "\n"
+         "• **USB VBUS:** " + String((unsigned long)readUsbVbusMilliVolts()) + " mV\n"
+         "• **Touch idle/trip:** " + String((unsigned long)touchIdleAvg) + " / " +
+         String((unsigned long)touchTripPoint()) + "\n"
          "• **Firmware:** https://github.com/dogma2u/A-discord-bot-on-ESP32";
 }
 // Discord REST: POST a chat message to a channel (content max 2000 chars).
@@ -946,6 +1022,16 @@ void updateBotPresenceIdle() {
   botDiscordStatus = 1;
   botDiscordStatusSent = true;
   sendBotPresence("idle", true);
+}
+
+// 80 MHz only when OLED is off and Discord status is Idle. Wi-Fi needs >= 80 MHz.
+void applyCpuForIdleState() {
+  bool slow = displayAsleep && botDiscordStatus == 1 && identified;
+  uint32_t want = slow ? CPU_MHZ_OLED_OFF_BOT_IDLE : CPU_MHZ_ACTIVE;
+  if (getCpuFrequencyMhz() == want) return;
+  setCpuFrequencyMhz(want);
+  // Serial.print("cpu MHz=");
+  // Serial.println(getCpuFrequencyMhz());
 }
 
 // Gateway OP 2 IDENTIFY after HELLO. Intents 37635 include members + presences + message content.
@@ -2187,7 +2273,7 @@ void connectGateway() {
 }
 // Boot: serial, PSRAM JSON, OLED, pins, Wi-Fi, NTP, member list, then Gateway.
 void setup() {
-  // Serial.begin(115200);
+  // Serial.begin(115200); // testing only
   delay(500);
   // Serial.print("PSRAM size: ");
   // Serial.println(ESP.getPsramSize());
@@ -2222,10 +2308,12 @@ void setup() {
 // Gateway pump, heartbeat, scheduled posts, OLED refresh/sleep. MCU never sleeps here.
 void loop() {
   pumpGateway();
+  applyCpuForIdleState();
   backgroundTasks();
-  // debugTouchSerial(); // Serial debug off to reduce CPU load
+  // debugTouchSerial();
   pollTouchWake();
   updateBotPresenceIdle();
   updateDisplay();
+  applyCpuForIdleState();
   delay(5);
 }
