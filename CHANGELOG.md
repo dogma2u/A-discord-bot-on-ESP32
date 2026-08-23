@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.14
+
+- Add `LICENSE` (MIT for original MiniMe files only; third-party libraries and APIs stay under their own terms). README points to it.
+
 ## 0.4.13
 
 - Mid-sentence one-word args work (`This is a test !led on of …` is `!led on`). `!ask` / `!display` still take the rest of the line.

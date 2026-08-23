@@ -1,0 +1,51 @@
+MIT License
+
+Copyright (c) 2026 James, K9DTV
+
+This license applies only to original MiniMe material in this repository,
+including:
+
+  - MiniMe_Discord_Bot/MiniMe_Discord_Bot.ino (as original source, not
+    as a claim over libraries it #includes)
+  - README.md, CHANGELOG.md, VERSION
+  - docs/ photographs and other original documentation
+
+It does not apply to third-party libraries, board support packages, fonts,
+or remote APIs that MiniMe uses at build time or at runtime. Those remain
+under their own licenses and terms of service. You must obtain and comply
+with them separately (Arduino Library Manager, Espressif, Discord, NASA,
+OpenWeatherMap, DeepSeek, arXiv, Spaceflight News, Open Notify, and any
+other service you enable).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Third-party software MiniMe is typically built with (not MiniMe, not MIT
+by this file). Check each project's current license in the copy you install:
+
+  - Espressif ESP32 Arduino core / IDF
+  - WiFi, WiFiClientSecure, Wire (Arduino / Espressif)
+  - WebSockets (Markus Sattler)
+  - ArduinoJson
+  - U8g2
+  - OneWire
+  - DallasTemperature
+  - Adafruit NeoPixel
+  - NTPClient

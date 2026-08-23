@@ -6,7 +6,7 @@ MiniMe is firmware for a **WeAct Studio ESP32-S3-N16R8** that runs a Discord bot
 
 *Breadboard prototype: WeAct Studio ESP32-S3-N16R8, 128×128 SSD1327 (GND / VCC / SCL / SDA), two discrete LEDs, and GPIO 4 touch wake pad (yellow wire loop). DS18B20 temperature sensor not wired yet — OLED shows `Temp: -- sensor --`.*
 
-Current version: see `VERSION` and `CHANGELOG.md`.
+Current version: see `VERSION` and `CHANGELOG.md`. License: see `LICENSE` (MIT for original MiniMe files only).
 
 ---
 
@@ -311,3 +311,11 @@ Do not enable `heap_caps_malloc_extmem_enable` for small allocations. Wi‑Fi / 
 
 - Never commit a sketch that contains a live bot token, API key, password, or Discord snowflake ID.
 - If a token leaks, reset it in the Developer Portal immediately.
+
+---
+
+## License
+
+Original MiniMe source, README, changelog, and photos in this repo are under the **MIT License**. See `LICENSE`.
+
+That grant does **not** cover Arduino/ESP32 libraries, U8g2, Discord, or other APIs. Those stay under their own licenses and terms. You still have to install the libraries listed under **Arduino IDE setup** and follow each service’s rules for keys and bots.
