@@ -27,7 +27,7 @@
  6) Touch wake pad (GPIO 4) + USB VBUS ADC (GPIO 1 divider)
  7) Gateway websocket, bot Online/Idle presence, scheduled posts, setup / loop
  Display sleep dims then blanks the OLED only. ESP32 and Wi-Fi stay running.
- Touch on GPIO 4 wakes the panel with the same on/dim/off timing.
+ Touch on GPIO 4 is polled in loop() to wake the panel (no touch interrupt).
  Bot Discord status: online on activity; idle after 5 minutes quiet. Touch does not set Online.
 */
 #include <WiFi.h>
@@ -303,7 +303,6 @@ void applyPresencesArray(JsonArray presences) {
     uint8_t newSt = statusFromDiscord(st);
     if (trackedUsers[idx].status != newSt) {
       trackedUsers[idx].status = newSt;
-      noteDisplayActivity();
     }
     // Serial.print("[PRESENCE] ");
     // Serial.print(trackedUsers[idx].userName);
@@ -369,7 +368,6 @@ void handlePresenceUpdate(JsonObject d) {
   uint8_t newSt = statusFromDiscord(st);
   if (trackedUsers[idx].status != newSt) {
     trackedUsers[idx].status = newSt;
-    noteDisplayActivity();
   }
 }
 
@@ -388,6 +386,7 @@ unsigned long lastDisplayActivityMillis = 0;
 // Built-in ESP32-S3 touch on TOUCH4. Compensated raw vs rolling idle avg + constant gap.
 unsigned long lastTouchWakeMillis = 0;
 unsigned long lastTouchDebugMillis = 0;
+bool touchWasActive = false;
 uint32_t touchIdleBuf[TOUCH_AVG_N];
 uint8_t touchIdleBufCount = 0;
 uint8_t touchIdleBufIdx = 0;
@@ -397,8 +396,6 @@ uint32_t touchRawMax = 0;
 uint32_t usbVbusRefMv = 0;
 uint32_t usbVbusMvCached = 0;
 unsigned long usbVbusLastReadMs = 0;
-volatile bool touchWakePending = false;
-uint32_t touchIrqThreshold = 0;
 bool displayAsleep = false;
 const unsigned long DISPLAY_IDLE_MS = 60000UL; // 1 minute full brightness
 const unsigned long DISPLAY_DIM_MS = 15000UL; // 15 seconds fade to off
@@ -429,11 +426,6 @@ void noteDisplayActivity() {
     lastDashMillis = 0;
   }
   u8g2.setContrast(DISPLAY_CONTRAST_FULL);
-}
-
-// ISR: touchAttachInterrupt sets flag; pollTouchWake() debounces and calls noteDisplayActivity().
-void IRAM_ATTR onTouchWake() {
-  touchWakePending = true;
 }
 
 uint32_t readTouchRaw(uint8_t pin) {
@@ -513,7 +505,6 @@ void updateTouchIdleAvg(uint32_t compensated) {
   if (!touchSampleValid(compensated)) return;
   if (compensated >= touchTripPoint()) return;
   touchIdlePush(compensated);
-  syncTouchInterruptThreshold();
 }
 
 void configureTouchHardware() {
@@ -524,28 +515,12 @@ void configureTouchHardware() {
 #endif
 }
 
-// Hardware IRQ uses raw touchRead vs this threshold. Keep it near software trip (not 0).
-void syncTouchInterruptThreshold() {
-  uint32_t t = touchTripPoint();
-  if (t == 0) t = TOUCH_THRESHOLD;
-  if (t == touchIrqThreshold) return;
-  if (touchIrqThreshold != 0) {
-    uint32_t d = (t > touchIrqThreshold) ? (t - touchIrqThreshold) : (touchIrqThreshold - t);
-    if (d < 50) return;
-  }
-  touchIrqThreshold = t;
-  touchDetachInterrupt(PIN_TOUCH);
-  touchAttachInterrupt(PIN_TOUCH, onTouchWake, t);
-}
-
 // Call once in setup() after WiFi/I2C — do not recalibrate earlier.
 void setupTouch() {
   // Serial.println("--- touch init ---");
   setupUsbVbusAdc();
   configureTouchHardware();
   calibrateTouchIdleAvg();
-  touchIrqThreshold = 0;
-  syncTouchInterruptThreshold();
   // Serial.print("touch GPIO");
   // Serial.print(PIN_TOUCH);
   // Serial.print(" idleAvg=");
@@ -609,14 +584,17 @@ bool touchIsActive() {
   return false;
 }
 
-// Polling fallback + interrupt flag; debounced wake into noteDisplayActivity().
-// Software trip is the source of truth so a sticky IRQ cannot keep the OLED awake.
+// Polled pad: rising edge only. A stuck/noisy trip must not keep resetting the idle timer.
 void pollTouchWake() {
+  bool active = touchIsActive();
+  if (!active) {
+    touchWasActive = false;
+    return;
+  }
   unsigned long now = millis();
   if (now - lastTouchWakeMillis < TOUCH_DEBOUNCE_MS) return;
-  if (!touchWakePending && !touchIsActive()) return;
-  touchWakePending = false;
-  if (!touchIsActive()) return;
+  if (touchWasActive) return;
+  touchWasActive = true;
   lastTouchWakeMillis = now;
   noteDisplayActivity();
 }
