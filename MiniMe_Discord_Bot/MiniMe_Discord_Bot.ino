@@ -398,6 +398,7 @@ uint32_t usbVbusRefMv = 0;
 uint32_t usbVbusMvCached = 0;
 unsigned long usbVbusLastReadMs = 0;
 volatile bool touchWakePending = false;
+uint32_t touchIrqThreshold = 0;
 bool displayAsleep = false;
 const unsigned long DISPLAY_IDLE_MS = 60000UL; // 1 minute full brightness
 const unsigned long DISPLAY_DIM_MS = 15000UL; // 15 seconds fade to off
@@ -512,6 +513,7 @@ void updateTouchIdleAvg(uint32_t compensated) {
   if (!touchSampleValid(compensated)) return;
   if (compensated >= touchTripPoint()) return;
   touchIdlePush(compensated);
+  syncTouchInterruptThreshold();
 }
 
 void configureTouchHardware() {
@@ -522,14 +524,28 @@ void configureTouchHardware() {
 #endif
 }
 
+// Hardware IRQ uses raw touchRead vs this threshold. Keep it near software trip (not 0).
+void syncTouchInterruptThreshold() {
+  uint32_t t = touchTripPoint();
+  if (t == 0) t = TOUCH_THRESHOLD;
+  if (t == touchIrqThreshold) return;
+  if (touchIrqThreshold != 0) {
+    uint32_t d = (t > touchIrqThreshold) ? (t - touchIrqThreshold) : (touchIrqThreshold - t);
+    if (d < 50) return;
+  }
+  touchIrqThreshold = t;
+  touchDetachInterrupt(PIN_TOUCH);
+  touchAttachInterrupt(PIN_TOUCH, onTouchWake, t);
+}
+
 // Call once in setup() after WiFi/I2C — do not recalibrate earlier.
 void setupTouch() {
   // Serial.println("--- touch init ---");
   setupUsbVbusAdc();
   configureTouchHardware();
   calibrateTouchIdleAvg();
-  touchDetachInterrupt(PIN_TOUCH);
-  touchAttachInterrupt(PIN_TOUCH, onTouchWake, 0);
+  touchIrqThreshold = 0;
+  syncTouchInterruptThreshold();
   // Serial.print("touch GPIO");
   // Serial.print(PIN_TOUCH);
   // Serial.print(" idleAvg=");
@@ -589,19 +605,18 @@ bool touchIsActive() {
   uint32_t raw = readTouchRaw(PIN_TOUCH);
   uint32_t compensated = compensateTouchRaw(raw);
   if (compensated >= touchTripPoint()) return true;
-#if SOC_TOUCH_SENSOR_VERSION == 2
-  if (touchInterruptGetLastStatus(PIN_TOUCH)) return true;
-#endif
   updateTouchIdleAvg(compensated);
   return false;
 }
 
 // Polling fallback + interrupt flag; debounced wake into noteDisplayActivity().
+// Software trip is the source of truth so a sticky IRQ cannot keep the OLED awake.
 void pollTouchWake() {
   unsigned long now = millis();
   if (now - lastTouchWakeMillis < TOUCH_DEBOUNCE_MS) return;
   if (!touchWakePending && !touchIsActive()) return;
   touchWakePending = false;
+  if (!touchIsActive()) return;
   lastTouchWakeMillis = now;
   noteDisplayActivity();
 }

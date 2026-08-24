@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.23
+
+- OLED sleep: wake only when compensated touch is at or above trip. Ignore sticky hardware IRQ status, and attach the interrupt at the trip point (not 0) so idle below trip can dim/off.
+
 ## 0.4.22
 
 - Comment out Serial (test logging off). Touch trip gap remains 2000.
