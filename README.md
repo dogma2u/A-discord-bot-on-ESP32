@@ -278,7 +278,7 @@ USB port voltage moves the raw touch numbers. MiniMe reads VBUS through a **divi
 1. **Do not** connect USB 5V directly to GPIO 1 (max ~3.3 V on the pin).
 2. Wire: **USB 5V (VBUS)** → **10 kΩ** → **GPIO 1** → **10 kΩ** → **GND**.
 3. Change `PIN_USB_VBUS_ADC` / `USB_VBUS_R_HI` / `USB_VBUS_R_LO` in the sketch if your divider or pin differs.
-4. `!sysinfo` reports **USB VBUS** in millivolts (about **5000** with a 1:1 divider on a healthy 5 V port). An unwired pin will read junk; compensation is skipped if the reading is below **1000 mV**.
+4. `!sysinfo` reports **USB VBUS** in volts to millivolt resolution (about **5.000 V** with a 1:1 divider on a healthy 5 V port). An unwired pin will read junk; compensation is skipped if the reading is below **1000 mV**. The ADC is sampled at most every **500 ms**.
 
 ### How it works in firmware
 

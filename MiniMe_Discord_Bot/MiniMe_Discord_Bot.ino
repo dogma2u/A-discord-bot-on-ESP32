@@ -79,7 +79,7 @@ const int PIN_USB_VBUS_ADC = 1;
 const uint32_t USB_VBUS_R_HI = 10000; // ohms, 5V side
 const uint32_t USB_VBUS_R_LO = 10000; // ohms, GND side
 const uint8_t TOUCH_AVG_N = 16;       // rolling idle window
-const unsigned long USB_VBUS_READ_MS = 50;
+const unsigned long USB_VBUS_READ_MS = 500;
 // ====== TIME CONFIG (NTP) — US Pacific, with daylight saving ======
 // NTP is fetched as UTC, then offset to PST or PDT for the dashboard clock and scheduled posts.
 WiFiUDP ntpUDP;
@@ -880,7 +880,7 @@ String getSystemInfo() {
          String((unsigned long)totalHeap) + " bytes\n"
          "• **WiFi RSSI:** " + String(rssi) + " dBm\n"
          "• **Gateway Status:** " + String((gatewayConnected && identified) ? "Connected" : "Disconnected") + "\n"
-         "• **USB VBUS:** " + String((unsigned long)readUsbVbusMilliVolts()) + " mV\n"
+         "• **USB VBUS:** " + String((float)readUsbVbusMilliVolts() / 1000.0f, 3) + " V\n"
          "• **Firmware:** https://github.com/dogma2u/A-discord-bot-on-ESP32";
 }
 // Discord REST: POST a chat message to a channel (content max 2000 chars).
