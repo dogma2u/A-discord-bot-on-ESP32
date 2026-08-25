@@ -23,7 +23,7 @@ Same list Discord shows for `!help`:
 - `!iss` — International Space Station position
 - `!news` — space / high-tech headlines
 - `!physics` — latest arXiv physics papers
-- `!sysinfo` — uptime, free heap (internal + 8MB PSRAM), Wi‑Fi RSSI, gateway, USB VBUS, touch idle/trip
+- `!sysinfo` — uptime, free heap (internal + 8MB PSRAM), Wi‑Fi RSSI, gateway, USB VBUS
 - `!temp` — indoor DS18B20 temperature
 - `!time` — bot local time (US Pacific, DST aware)
 - `!weather <zip>` — US ZIP weather (OpenWeatherMap)

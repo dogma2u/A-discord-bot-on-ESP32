@@ -881,8 +881,6 @@ String getSystemInfo() {
          "• **WiFi RSSI:** " + String(rssi) + " dBm\n"
          "• **Gateway Status:** " + String((gatewayConnected && identified) ? "Connected" : "Disconnected") + "\n"
          "• **USB VBUS:** " + String((unsigned long)readUsbVbusMilliVolts()) + " mV\n"
-         "• **Touch idle/trip:** " + String((unsigned long)touchIdleAvg) + " / " +
-         String((unsigned long)touchTripPoint()) + "\n"
          "• **Firmware:** https://github.com/dogma2u/A-discord-bot-on-ESP32";
 }
 // Discord REST: POST a chat message to a channel (content max 2000 chars).
