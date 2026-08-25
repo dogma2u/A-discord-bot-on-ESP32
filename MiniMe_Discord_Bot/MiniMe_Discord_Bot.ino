@@ -389,6 +389,7 @@ uint32_t touchIdleAvg = 0;
 uint32_t touchRawMax = 0;
 uint32_t usbVbusRefMv = 0;
 uint32_t usbVbusMvCached = 0;
+uint32_t usbVbusCompLastMv = 0;
 unsigned long usbVbusLastReadMs = 0;
 bool displayAsleep = false;
 const unsigned long DISPLAY_IDLE_MS = 60000UL; // 1 minute full brightness
@@ -441,14 +442,31 @@ uint32_t readUsbVbusMilliVolts() {
   }
   usbVbusLastReadMs = now;
   uint32_t pinMv = analogReadMilliVolts((uint8_t)PIN_USB_VBUS_ADC);
-  usbVbusMvCached = (uint32_t)((uint64_t)pinMv * (USB_VBUS_R_HI + USB_VBUS_R_LO) / USB_VBUS_R_LO);
+  uint32_t inst = (uint32_t)((uint64_t)pinMv * (USB_VBUS_R_HI + USB_VBUS_R_LO) / USB_VBUS_R_LO);
+  if (usbVbusMvCached == 0) usbVbusMvCached = inst;
+  else usbVbusMvCached = (usbVbusMvCached * 7u + inst) / 8u;
   return usbVbusMvCached;
+}
+
+// Compensated idle samples are raw * ref / V. When V steps, rescale the window so trip stays put.
+void rescaleTouchIdleForVbus(uint32_t oldV, uint32_t newV) {
+  if (oldV == 0 || newV == 0 || touchIdleBufCount == 0) return;
+  touchIdleSum = 0;
+  for (uint8_t i = 0; i < touchIdleBufCount; i++) {
+    touchIdleBuf[i] = (uint32_t)((uint64_t)touchIdleBuf[i] * oldV / newV);
+    touchIdleSum += touchIdleBuf[i];
+  }
+  touchIdleAvg = touchIdleSum / touchIdleBufCount;
 }
 
 // Scale touch raw to boot-time USB voltage so VBUS sag/swell does not walk the gap.
 uint32_t compensateTouchRaw(uint32_t raw) {
   uint32_t v = readUsbVbusMilliVolts();
   if (usbVbusRefMv < 1000 || v < 1000) return raw;
+  if (usbVbusCompLastMv >= 1000 && usbVbusCompLastMv != v) {
+    rescaleTouchIdleForVbus(usbVbusCompLastMv, v);
+  }
+  usbVbusCompLastMv = v;
   return (uint32_t)((uint64_t)raw * usbVbusRefMv / v);
 }
 
@@ -462,6 +480,7 @@ void setupUsbVbusAdc() {
     delay(10);
   }
   usbVbusRefMv = acc / 8;
+  usbVbusCompLastMv = usbVbusMvCached;
 }
 
 void touchIdlePush(uint32_t sample) {
