@@ -1948,8 +1948,13 @@ void handleCommand(const String& content, const String& authorId, const String& 
     sendDiscordMessage(channelId, "Display updated.");
     return;
   }
+  int setN = 0;
+  if (cmdWord.length() == 5 && cmdWord.startsWith("!set")) {
+    char d = cmdWord.charAt(4);
+    if (d == '1' || d == '2') setN = d - '0';
+  }
   // Owner-only hardware: LED, set1/set2, servo.
-  if (cmdWord == "!led" || cmdWord == "!set1" || cmdWord == "!set2" || cmdWord == "!servo") {
+  if (cmdWord == "!led" || setN != 0 || cmdWord == "!servo") {
     if (!isOwner(authorId)) {
       if (!isDM) {
         sendDiscordMessage(channelId, "You are not allowed to use this command.");
@@ -1974,36 +1979,20 @@ void handleCommand(const String& content, const String& authorId, const String& 
       }
       return;
     }
-    if (cmdWord == "!set1") {
+    if (setN != 0) {
       String a = args;
       a.toLowerCase();
-      if (a == "on") {
-        digitalWrite(PIN_SET1, HIGH);
-        sendDiscordMessage(channelId, "set1 ON");
-        showTransient("set1", "ON");
-      } else if (a == "off") {
-        digitalWrite(PIN_SET1, LOW);
-        sendDiscordMessage(channelId, "set1 OFF");
-        showTransient("set1", "OFF");
-      } else {
-        sendDiscordMessage(channelId, "Usage: !set1 on/off");
+      int pin = (setN == 1) ? PIN_SET1 : PIN_SET2;
+      if (a != "on" && a != "off") {
+        sendDiscordMessage(channelId, "Usage: !set1 on/off  or  !set2 on/off");
+        return;
       }
-      return;
-    }
-    if (cmdWord == "!set2") {
-      String a = args;
-      a.toLowerCase();
-      if (a == "on") {
-        digitalWrite(PIN_SET2, HIGH);
-        sendDiscordMessage(channelId, "set2 ON");
-        showTransient("set2", "ON");
-      } else if (a == "off") {
-        digitalWrite(PIN_SET2, LOW);
-        sendDiscordMessage(channelId, "set2 OFF");
-        showTransient("set2", "OFF");
-      } else {
-        sendDiscordMessage(channelId, "Usage: !set2 on/off");
-      }
+      bool on = (a == "on");
+      digitalWrite(pin, on ? HIGH : LOW);
+      String label = "set" + String(setN);
+      String val = on ? "ON" : "OFF";
+      sendDiscordMessage(channelId, label + " " + val);
+      showTransient(label, val);
       return;
     }
     if (cmdWord == "!servo") {
