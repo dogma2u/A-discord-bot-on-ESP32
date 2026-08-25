@@ -60,7 +60,6 @@ const char* DEEPSEEK_API_KEY = "DEEPSEEK_API_KEY";
 // TARGET_CHANNEL_ID: commands + auto sysinfo / 6-12-18 temp posts.
 // TARGET_CHANNEL_ID1: second channel that may run commands.
 const String OWNER_ID_STR        = "OWNER_ID_STR";
-const char*  TEMP_CHANNEL_ID_STR = "TEMP_CHANNEL_ID_STR";  // main channel
 const String TARGET_CHANNEL_ID  = "TARGET_CHANNEL_ID";
 const String TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";
 // ====== GPIO CONFIG ======
@@ -75,7 +74,6 @@ const int PIN_I2C_SDA = 8;
 const int PIN_I2C_SCL = 9;
 const int PIN_TOUCH   = 4; // TOUCH4 — wire pad here
 const uint32_t TOUCH_THRESHOLD = 2000; // constant gap: trip = rolling idle avg + this
-const unsigned long TOUCH_DEBUG_MS = 500;
 // USB 5V (VBUS) → 10k → PIN_USB_VBUS_ADC → 10k → GND. Do not feed 5V straight into the pin.
 const int PIN_USB_VBUS_ADC = 1;
 const uint32_t USB_VBUS_R_HI = 10000; // ohms, 5V side
@@ -170,9 +168,6 @@ void drawDashboard();
 float dashTempC = -999.0f;
 float dashTempF = -999.0f;
 int lastServoDeg = 45;
-String dashLastCmd   = "none";
-String dashLastEvent = "Starting...";
-unsigned long dashLastCmdMillis = 0;
 
 // ====== USER TRACKING (8 dashboard rows) ======
 // Eight OLED rows: name, On/Idle/DND/Off, Bot:N (commands in the last 24h).
@@ -385,7 +380,6 @@ unsigned long lastDisplayActivityMillis = 0;
 // ====== TOUCH WAKE (GPIO 4, capacitive pad) ======
 // Built-in ESP32-S3 touch on TOUCH4. Compensated raw vs rolling idle avg + constant gap.
 unsigned long lastTouchWakeMillis = 0;
-unsigned long lastTouchDebugMillis = 0;
 bool touchWasActive = false;
 uint32_t touchIdleBuf[TOUCH_AVG_N];
 uint8_t touchIdleBufCount = 0;
@@ -544,36 +538,6 @@ void printUsbVbusSerial() {
   // if (hun < 10) Serial.print("0");
   // Serial.print(hun);
   // Serial.println(" V");
-}
-
-void debugTouchSerial() {
-  unsigned long now = millis();
-  if (now - lastTouchDebugMillis < TOUCH_DEBUG_MS) return;
-  lastTouchDebugMillis = now;
-
-  uint32_t raw = readTouchRaw(PIN_TOUCH);
-  uint32_t compensated = compensateTouchRaw(raw);
-  uint32_t trip = touchTripPoint();
-  bool touched = compensated >= trip;
-
-  if (!touched) updateTouchIdleAvg(compensated);
-  if (raw > touchRawMax) touchRawMax = raw;
-
-  // Serial.print("touch GPIO");
-  // Serial.print(PIN_TOUCH);
-  // Serial.print(": raw=");
-  // Serial.print(raw);
-  // Serial.print(" comp=");
-  // Serial.print(compensated);
-  // Serial.print(" idleAvg=");
-  // Serial.print(touchIdleAvg);
-  // Serial.print(" trip=");
-  // Serial.print(trip);
-  // Serial.print(" usbMv=");
-  // Serial.print(readUsbVbusMilliVolts());
-  // Serial.print(" touched=");
-  // Serial.println(touched ? "YES" : "no");
-  // printUsbVbusSerial();
 }
 
 bool touchIsActive() {
@@ -808,11 +772,6 @@ void drawDashboard() {
   u8g2.drawStr(0, 127, row16.c_str());
 
   u8g2.sendBuffer();
-}
-
-// Draw status on rows 15-16 without wiping the dashboard.
-void drawTransient() {
-  lastDashMillis = 0;
 }
 
 // Called from loop: sleep check, then 2s dashboard refresh (rows 15-16 show events while active).
@@ -1769,16 +1728,13 @@ void runAskFromLoop() {
       ? "DeepSeek answered, but Discord rejected the post (try a shorter question)."
       : truncateText(report, 1800);
     if (!sendDiscordMessage(channelId, fallback)) {
-      dashLastEvent = "Ask post fail";
       showTransient("DeepSeek", "Post fail");
       return;
     }
   }
   if (ok) {
-    dashLastEvent = "Ask sent";
     showTransient("DeepSeek", "Sent");
   } else {
-    dashLastEvent = "Ask error";
     showTransient("DeepSeek", "Error");
   }
 }
@@ -1834,11 +1790,6 @@ void handleCommand(const String& content, const String& authorId, const String& 
     }
   }
 
-  // Extract command name for the dashboard (first word, max 14 chars)
-  dashLastCmd = cmdWord;
-  if (dashLastCmd.length() > 14) dashLastCmd = dashLastCmd.substring(0, 14);
-  dashLastCmdMillis = millis();
-
   // Count this command usage for dashboard (reset happens every 24h).
   recordUserUse(authorId, authorName);
 
@@ -1863,7 +1814,6 @@ void handleCommand(const String& content, const String& authorId, const String& 
       "• `!set1 on` / `!set1 off` — Controls digital output pin 1.\n"
       "• `!set2 on` / `!set2 off` — Controls digital output pin 2.";
     sendDiscordMessage(channelId, helpMsg);
-    dashLastEvent = "Help sent";
     showTransient("Help", "Command Sent");
     return;
   }
@@ -1888,11 +1838,9 @@ void handleCommand(const String& content, const String& authorId, const String& 
     showTransient("Weather", "Fetching " + zip + "...");
     if (getWeather(zip, report)) {
       sendDiscordMessage(channelId, report);
-      dashLastEvent = "Weather " + zip;
       showTransient("Weather", zip, "Sent");
     } else {
       sendDiscordMessage(channelId, report);
-      dashLastEvent = "Weather error";
       showTransient("Weather", "Error");
     }
     return;
@@ -1902,11 +1850,9 @@ void handleCommand(const String& content, const String& authorId, const String& 
     showTransient("News", "Fetching...");
     if (getScienceNews(report)) {
       sendDiscordMessage(channelId, report);
-      dashLastEvent = "News sent";
       showTransient("News", "Sent");
     } else {
       sendDiscordMessage(channelId, report);
-      dashLastEvent = "News error";
       showTransient("News", "Error");
     }
     return;
@@ -1916,11 +1862,9 @@ void handleCommand(const String& content, const String& authorId, const String& 
     showTransient("Physics", "Fetching arXiv...");
     if (getPhysicsPapers(report)) {
       sendDiscordMessage(channelId, report);
-      dashLastEvent = "Physics sent";
       showTransient("Physics", "Sent");
     } else {
       sendDiscordMessage(channelId, report);
-      dashLastEvent = "Physics error";
       showTransient("Physics", "Error");
     }
     return;
@@ -1930,11 +1874,9 @@ void handleCommand(const String& content, const String& authorId, const String& 
     showTransient("APOD", "Fetching NASA...");
     if (getApod(report)) {
       sendDiscordMessage(channelId, report);
-      dashLastEvent = "APOD sent";
       showTransient("APOD", "Sent");
     } else {
       sendDiscordMessage(channelId, report);
-      dashLastEvent = "APOD error";
       showTransient("APOD", "Error");
     }
     return;
@@ -1944,11 +1886,9 @@ void handleCommand(const String& content, const String& authorId, const String& 
     showTransient("ISS", "Fetching...");
     if (getIssPosition(report)) {
       sendDiscordMessage(channelId, report);
-      dashLastEvent = "ISS sent";
       showTransient("ISS", "Sent");
     } else {
       sendDiscordMessage(channelId, report);
-      dashLastEvent = "ISS error";
       showTransient("ISS", "Error");
     }
     return;
@@ -1960,18 +1900,15 @@ void handleCommand(const String& content, const String& authorId, const String& 
       dashTempF = f;
       String msg = "Current Temp: " + String(c, 1) + "°C / " + String(f, 1) + "°F";
       sendDiscordMessage(channelId, msg);
-      dashLastEvent = String(f, 1) + "F sent";
       showTransient("Temp", String(f, 1) + "F/" + String(c, 1) + "C");
     } else {
       sendDiscordMessage(channelId, "Temperature sensor error.");
-      dashLastEvent = "Temp sensor err";
       showTransient("Temp", "Sensor error");
     }
     return;
   }
   if (cmdWord == "!sysinfo") {
     sendDiscordMessage(channelId, getSystemInfo(), true);
-    dashLastEvent = "SysInfo sent";
     showTransient("SysInfo", "Sent");
     return;
   }
@@ -1980,7 +1917,6 @@ void handleCommand(const String& content, const String& authorId, const String& 
     String currentTime = timeClient.getFormattedTime();
     String msg = "🕒 Current Bot Time: " + currentTime;
     sendDiscordMessage(channelId, msg);
-    dashLastEvent = "Time: " + currentTime;
     showTransient("Time", currentTime);
     return;
   }
@@ -1997,7 +1933,6 @@ void handleCommand(const String& content, const String& authorId, const String& 
     askPendingQuestion = question;
     askPendingChannelId = channelId;
     askNeedPost = true;
-    dashLastEvent = "Ask queued";
     showTransient("DeepSeek", "Queued");
     // Serial.println("[ASK] queued (HTTPS from loop)");
     return;
@@ -2011,7 +1946,6 @@ void handleCommand(const String& content, const String& authorId, const String& 
     if (text.length() > 50) text = text.substring(0, 50);
     String line15 = text.substring(0, text.length() > 25 ? 25 : text.length());
     String line16 = text.length() > 25 ? text.substring(25) : "";
-    dashLastEvent = text.length() > 14 ? text.substring(0, 14) : text;
     showTransient(line15, line16, "", 6000);
     sendDiscordMessage(channelId, "Display updated.");
     return;
@@ -2031,13 +1965,11 @@ void handleCommand(const String& content, const String& authorId, const String& 
         pixels.setPixelColor(0, pixels.Color(255, 255, 255));
         pixels.show();
         sendDiscordMessage(channelId, "LED ON");
-        dashLastEvent = "LED ON";
         showTransient("LED", "ON");
       } else if (a == "off") {
         pixels.setPixelColor(0, pixels.Color(0, 0, 0));
         pixels.show();
         sendDiscordMessage(channelId, "LED OFF");
-        dashLastEvent = "LED OFF";
         showTransient("LED", "OFF");
       } else {
         sendDiscordMessage(channelId, "Usage: !led on/off");
@@ -2050,12 +1982,10 @@ void handleCommand(const String& content, const String& authorId, const String& 
       if (a == "on") {
         digitalWrite(PIN_SET1, HIGH);
         sendDiscordMessage(channelId, "set1 ON");
-        dashLastEvent = "set1 ON";
         showTransient("set1", "ON");
       } else if (a == "off") {
         digitalWrite(PIN_SET1, LOW);
         sendDiscordMessage(channelId, "set1 OFF");
-        dashLastEvent = "set1 OFF";
         showTransient("set1", "OFF");
       } else {
         sendDiscordMessage(channelId, "Usage: !set1 on/off");
@@ -2068,12 +1998,10 @@ void handleCommand(const String& content, const String& authorId, const String& 
       if (a == "on") {
         digitalWrite(PIN_SET2, HIGH);
         sendDiscordMessage(channelId, "set2 ON");
-        dashLastEvent = "set2 ON";
         showTransient("set2", "ON");
       } else if (a == "off") {
         digitalWrite(PIN_SET2, LOW);
         sendDiscordMessage(channelId, "set2 OFF");
-        dashLastEvent = "set2 OFF";
         showTransient("set2", "OFF");
       } else {
         sendDiscordMessage(channelId, "Usage: !set2 on/off");
@@ -2093,14 +2021,12 @@ void handleCommand(const String& content, const String& authorId, const String& 
       setServoAngle(angle);
       String msg = "Servo set to " + String(angle) + " degrees.";
       sendDiscordMessage(channelId, msg);
-      dashLastEvent = "Servo " + String(angle) + "deg";
       showTransient("Servo", String(angle) + " deg");
       return;
     }
   }
 
   sendDiscordMessage(channelId, "That is not a command.");
-  dashLastEvent = "Unknown cmd";
   showTransient("Unknown", cmdWord);
 }
 // ====== DISCORD GATEWAY WEBSOCKET ======
@@ -2112,13 +2038,11 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
       identified       = false;
       botDiscordStatusSent = false;
       // Serial.println("[GW] DISCONNECTED");
-      dashLastEvent = "GW Disconnected";
       showTransient("Gateway", "Disconnected");
       break;
     case WStype_CONNECTED:
       gatewayConnected = true;
       // Serial.println("[GW] CONNECTED");
-      dashLastEvent = "GW Connected";
       showTransient("Gateway", "Connected");
       break;
     case WStype_TEXT: {
@@ -2235,7 +2159,6 @@ void backgroundTasks() {
         String report = "⏰ **Scheduled Summary (" + String(currentHour) + ":00):**\n" +
                         "• **Indoor Temp:** " + String(c, 1) + "°C / " + String(f, 1) + "°F";
         sendDiscordMessage(TARGET_CHANNEL_ID, report);
-        dashLastEvent = "Sched report";
         showTransient("Scheduled", "Report Sent");
       } else {
         sendDiscordMessage(TARGET_CHANNEL_ID, "⏰ **Scheduled Summary:** Temperature sensor error.");
@@ -2305,7 +2228,6 @@ void loop() {
   pumpGateway();
   applyCpuForIdleState();
   backgroundTasks();
-  // debugTouchSerial();
   pollTouchWake();
   updateBotPresenceIdle();
   updateDisplay();

@@ -92,9 +92,11 @@ Commands and gateway events **do not wipe** the dashboard. They write **rows 15 
 
 After **1 minute** with no real events, contrast **dims over 15 seconds**, then the panel turns **off** (`u8g2.setPowerSave(1)`). That is OLED power-save only. The microcontroller, Wi-Fi, and Discord Gateway keep running.
 
-These **do not** reset the timer: signal / heap / servo bars, clock, uptime, and the 2-second dashboard refresh.
+These **do not** reset the timer: signal / heap / servo bars, clock, uptime/temp on row 3, and the 2-second dashboard refresh.
 
-These **wake** the panel and restart the 1-minute timer: **touch on the wake pad (GPIO 4)**, Discord commands, presence status changes, gateway connect/disconnect, `!display`, scheduled reports, and other status lines on rows 15–16.
+These **wake** the panel and restart the 1-minute timer: **touch on the wake pad (GPIO 4)**, Discord commands, gateway connect/disconnect, `!display`, scheduled reports, and other status lines on rows 15–16. Presence updates for the eight user rows **do not** wake the panel.
+
+When the OLED is off **and** Discord status is Idle, CPU is **80 MHz**; otherwise **240 MHz**.
 
 ---
 
@@ -109,7 +111,6 @@ const char* NASA_API_KEY    = "NASA_API_KEY";
 const char* DEEPSEEK_API_KEY = "DEEPSEEK_API_KEY";
 #define BOT_GUILD_ID "GUILD_ID"
 const String OWNER_ID_STR        = "OWNER_ID_STR";
-const char*  TEMP_CHANNEL_ID_STR = "TEMP_CHANNEL_ID_STR";
 const String TARGET_CHANNEL_ID  = "TARGET_CHANNEL_ID";
 const String TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";
 ```
@@ -125,7 +126,6 @@ const String TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";
 | `OWNER_ID_STR` | Who can run LED / set1 / set2 / servo |
 | `TARGET_CHANNEL_ID` | Commands + auto sysinfo / scheduled summaries |
 | `TARGET_CHANNEL_ID1` | Second channel where commands are allowed |
-| `TEMP_CHANNEL_ID_STR` | Reserved / unused by commands |
 
 IDs are **digits only**. Paste them as C strings, for example `"123456789012345678"`.
 
@@ -220,7 +220,7 @@ These are public. Digests are short so the ESP32 stays within memory limits.
 3. Create a key and copy it.
 4. Paste it into `DEEPSEEK_API_KEY`.
 5. In Discord: `!ask what is quantum entanglement?`
-6. Replies can be longer now (`max_tokens` 900, post cap 3600 characters). HTTPS on the ESP32 can take several seconds.
+6. Replies are capped at **2000** characters (Discord limit). HTTPS on the ESP32 can take several seconds.
 
 ---
 
@@ -285,20 +285,16 @@ USB port voltage moves the raw touch numbers. MiniMe reads VBUS through a **divi
 - **`PIN_TOUCH`** is **4** (change in the sketch if you use a different touch-capable GPIO).
 - At boot, **`setupTouch()`** runs **after Wi-Fi and I2C**. It samples USB VBUS, then fills a **16-sample rolling average** of voltage-compensated idle touch readings (`touchIdleAvg`).
 - Trip is always **`touchIdleAvg + TOUCH_THRESHOLD`** (default gap **2000**). Idle samples below trip keep updating the rolling window; a tap does not.
-- **`touchAttachInterrupt`** fires on touch; **`pollTouchWake()`** in `loop()` debounces (**300 ms**) and calls the same wake path as a Discord event (full contrast, 1-minute idle timer restarted).
-- Serial monitor **115200** prints debug every **500 ms**, for example:
-  ```
-  touch GPIO4: raw=42000 comp=41800 idleAvg=38000 trip=41500 usbMv=4980 touched=YES
-  ```
-  On boot you also see `--- touch init ---` with `idleAvg`, `trip`, and `usbMv`.
+- **`loop()`** calls **`pollTouchWake()`** (no touch interrupt). A rising edge, after a **300 ms** debounce, uses the same wake path as a Discord event (full contrast, 1-minute idle timer restarted).
+- Serial touch debug is **off** (commented out in the sketch).
 
 ### Tuning sensitivity
 
-If the pad is **hard to trigger**, decrease **`TOUCH_THRESHOLD`** in the sketch (try **300**).
+If the pad is **hard to trigger**, decrease **`TOUCH_THRESHOLD`** (default **2000**).
 
-If it **false-triggers** or stays “touched” when idle, **increase** the threshold (try **600** or **700**) or use a **smaller pad**.
+If it **false-triggers** or stays “touched” when idle, **increase** the threshold or use a **smaller pad**.
 
-After changing the threshold, re-upload and watch Serial: tap the pad and confirm `touched=YES` only when you touch it, and `raw` rises clearly above `trip`.
+After changing the threshold, re-upload and tap the pad: the OLED should wake only on a real touch.
 
 ### What touch does *not* do
 
@@ -322,7 +318,7 @@ After changing the threshold, re-upload and watch Serial: tap the pad and confir
    - NTPClient
 5. Open `MiniMe_Discord_Bot/MiniMe_Discord_Bot.ino`.
 6. Fill in Wi‑Fi, token, keys, and IDs.
-7. Upload. Serial monitor **115200**: look for PSRAM size, `[GW] CONNECTED`, `[GW] IDENTIFY sent`, and `--- touch init ---`.
+7. Upload. Serial logging in the sketch is commented out; use Discord `!help` and the OLED to confirm it is running.
 8. In Discord, try `!help`. Tap the GPIO 4 pad to wake the OLED after it dims off.
 
 Do not enable `heap_caps_malloc_extmem_enable` for small allocations. Wi‑Fi / TLS in PSRAM can crash this board. Gateway JSON (`256KB`) is allocated in PSRAM on purpose.

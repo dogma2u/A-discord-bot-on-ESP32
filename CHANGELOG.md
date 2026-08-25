@@ -1,5 +1,12 @@
 # Changelog
 
+Older sections describe that release as shipped. Current firmware and docs are **0.4.26** (see `VERSION` and README).
+
+## 0.4.26
+
+- Remove unused `dashLastCmd`, `dashLastEvent`, `dashLastCmdMillis`, `TEMP_CHANNEL_ID_STR`, `drawTransient()`, `debugTouchSerial()`, `TOUCH_DEBUG_MS`, and `lastTouchDebugMillis`.
+- README matches current firmware: poll-only OLED wake (no touch interrupt, no Serial touch debug); `!ask` Discord cap **2000** (not 3600); presence updates do not wake the OLED; `TOUCH_THRESHOLD` default **2000**; CPU 80 MHz when OLED is off and bot is Idle.
+
 ## 0.4.25
 
 - OLED: uptime and temp on row 3; Sig / Heap / Srv shift down one row. User rows 7–14 and rows 15–16 unchanged.
