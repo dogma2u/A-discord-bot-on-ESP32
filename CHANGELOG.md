@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.24
+
+- DS18B20 on GPIO 10: enable `INPUT_PULLUP` at boot and before each temperature read.
+- README breadboard photo now includes the DS18B20 (`docs/minime-breadboard-v2.jpg`).
+
 ## 0.4.23
 
 - OLED sleep: wake only when compensated touch is at or above trip. Ignore sticky hardware IRQ status, and attach the interrupt at the trip point (not 0) so idle below trip can dim/off.

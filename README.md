@@ -2,9 +2,9 @@
 
 MiniMe is firmware for a **WeAct Studio ESP32-S3-N16R8** that runs a Discord bot on the chip. It joins Wi‑Fi and the Discord Gateway, reads sensors, drives GPIO from chat, and shows a live dashboard on a **128×128 SSD1327** OLED.
 
-![MiniMe ESP32-S3 breadboard prototype with SSD1327 OLED and touch pad](docs/minime-breadboard-v2.png)
+![MiniMe ESP32-S3 breadboard prototype with SSD1327 OLED, touch pad, and DS18B20](docs/minime-breadboard-v2.jpg)
 
-*Breadboard prototype: WeAct Studio ESP32-S3-N16R8, 128×128 SSD1327 (GND / VCC / SCL / SDA), two discrete LEDs, and GPIO 4 touch wake pad (yellow wire loop). DS18B20 temperature sensor not wired yet — OLED shows `Temp: -- sensor --`.*
+*Breadboard prototype: WeAct Studio ESP32-S3-N16R8, 128×128 SSD1327 (GND / VCC / SCL / SDA), two discrete LEDs, GPIO 4 touch wake pad (yellow wire loop), and DS18B20 on GPIO 10. Sensor fail on the OLED is `T:--Error--`.*
 
 Current version: see `VERSION` and `CHANGELOG.md`. License: see `LICENSE` (MIT for original MiniMe files only).
 
@@ -243,6 +243,18 @@ Display: **SSD1327**, **128×128** pixels, I2C.
 | USB VBUS ADC (divider) | 1 |
 
 OLED module labels: **GND, VCC, SCL, SDA**. The panel is **128×128**. Change pins in the sketch if your wiring differs.
+
+### DS18B20 (GPIO 10)
+
+TO-92, powered from **3.3 V** (not parasitic). Firmware enables the ESP32 **internal pull-up** on GPIO 10. A **4.7 kΩ** resistor from **DQ to 3.3 V** is still recommended; the internal pull-up is weak.
+
+| TO-92 lead (flat toward you, leads down) | Connect to |
+|---|---|
+| Left | GND |
+| Middle (DQ) | GPIO 10 |
+| Right (VDD) | 3.3 V |
+
+`!temp` and scheduled indoor summaries use this sensor. If it is missing or the bus fails, Discord replies `Temperature sensor error.` and the OLED shows `T:--Error--`.
 
 ---
 

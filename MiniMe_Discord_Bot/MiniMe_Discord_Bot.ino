@@ -882,11 +882,13 @@ void setupPins() {
   pinMode(PIN_SET2, OUTPUT);
   digitalWrite(PIN_SET1, LOW);
   digitalWrite(PIN_SET2, LOW);
+  pinMode(PIN_DS18B20, INPUT_PULLUP);
   setupServo();
   setServoAngle(45);
 }
 // DS18B20 read for dashboard, !temp, and scheduled summaries.
 bool readTemperature(float &tempC, float &tempF) {
+  pinMode(PIN_DS18B20, INPUT_PULLUP);
   sensors.requestTemperatures();
   float c = sensors.getTempCByIndex(0);
   if (c == DEVICE_DISCONNECTED_C) {
