@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.25
+
+- OLED: uptime and temp on row 3; Sig / Heap / Srv shift down one row. User rows 7–14 and rows 15–16 unchanged.
+
 ## 0.4.24
 
 - DS18B20 on GPIO 10: enable `INPUT_PULLUP` at boot and before each temperature read.

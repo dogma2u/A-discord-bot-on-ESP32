@@ -695,47 +695,7 @@ void drawDashboard() {
     u8g2.drawStr(dateX, 15, dateBuf);
   }
 
-  // ---- Rows 3-4: Signal + Heap bars ----
-  long rssi = WiFi.RSSI();
-  uint32_t freeHeap = ESP.getFreeHeap();
-  uint32_t totalHeap = ESP.getHeapSize();
-
-  // Signal bar (row 3)
-  int sigBarW = 0;
-  if (rssi >= -40) sigBarW = 79;
-  else if (rssi <= -100) sigBarW = 0;
-  else sigBarW = (int)((rssi + 100) * 79 / 60);
-  u8g2.drawStr(0, 23, "Sig:");
-  u8g2.drawFrame(25, 16, 103, 8);
-  if (sigBarW > 0) u8g2.drawBox(26, 17, sigBarW, 6);
-
-  // Heap bar (row 4) — internal SRAM + this board's 8MB PSRAM, original 8px height
-  uint32_t psramSize = ESP.getPsramSize();
-  uint32_t psramFree = ESP.getFreePsram();
-  if (psramSize < BOARD_PSRAM_BYTES) psramSize = BOARD_PSRAM_BYTES;
-  if (psramFree < 1) psramFree = BOARD_PSRAM_BYTES;
-  uint32_t memTotal = totalHeap + psramSize;
-  uint32_t memFree  = freeHeap + psramFree;
-  int heapBarW = 0;
-  if (memTotal > 0) {
-    heapBarW = (int)((memFree * 79UL) / memTotal);
-    if (heapBarW < 0) heapBarW = 0;
-    if (heapBarW > 79) heapBarW = 79;
-  }
-  u8g2.drawStr(0, 31, "Heap:");
-  u8g2.drawFrame(25, 24, 103, 8);
-  if (heapBarW > 0) u8g2.drawBox(26, 25, heapBarW, 6);
-
-  // Servo bar (row 5) — last !servo angle 0-90, fill matches inner frame (101px)
-  const int srvInnerW = 101;
-  int srvBarW = (lastServoDeg * srvInnerW) / 90;
-  if (srvBarW < 0) srvBarW = 0;
-  if (srvBarW > srvInnerW) srvBarW = srvInnerW;
-  u8g2.drawStr(0, 39, "Srv:");
-  u8g2.drawFrame(25, 32, 103, 8);
-  if (srvBarW > 0) u8g2.drawBox(26, 33, srvBarW, 6);
-
-  // ---- Row 6: Up + Temp — Up:xxxxdxxhxxm T:xxxF/xxxC (space-pad, no leading zeros) ----
+  // ---- Row 3: Up + Temp — Up:xxxxdxxhxxm T:xxxF/xxxC (space-pad, no leading zeros) ----
   unsigned long uptimeSec = millis() / 1000;
   unsigned long d = uptimeSec / 86400;
   unsigned long h = (uptimeSec % 86400) / 3600;
@@ -748,7 +708,47 @@ void drawDashboard() {
   } else {
     snprintf(upTempBuf, sizeof(upTempBuf), "Up:%4lud%2luh%2lum T:--Error--", d, h, m);
   }
-  u8g2.drawStr(0, 47, upTempBuf);
+  u8g2.drawStr(0, 23, upTempBuf);
+
+  // ---- Rows 4-6: Signal + Heap + Servo bars ----
+  long rssi = WiFi.RSSI();
+  uint32_t freeHeap = ESP.getFreeHeap();
+  uint32_t totalHeap = ESP.getHeapSize();
+
+  // Signal bar (row 4)
+  int sigBarW = 0;
+  if (rssi >= -40) sigBarW = 79;
+  else if (rssi <= -100) sigBarW = 0;
+  else sigBarW = (int)((rssi + 100) * 79 / 60);
+  u8g2.drawStr(0, 31, "Sig:");
+  u8g2.drawFrame(25, 24, 103, 8);
+  if (sigBarW > 0) u8g2.drawBox(26, 25, sigBarW, 6);
+
+  // Heap bar (row 5) — internal SRAM + this board's 8MB PSRAM, original 8px height
+  uint32_t psramSize = ESP.getPsramSize();
+  uint32_t psramFree = ESP.getFreePsram();
+  if (psramSize < BOARD_PSRAM_BYTES) psramSize = BOARD_PSRAM_BYTES;
+  if (psramFree < 1) psramFree = BOARD_PSRAM_BYTES;
+  uint32_t memTotal = totalHeap + psramSize;
+  uint32_t memFree  = freeHeap + psramFree;
+  int heapBarW = 0;
+  if (memTotal > 0) {
+    heapBarW = (int)((memFree * 79UL) / memTotal);
+    if (heapBarW < 0) heapBarW = 0;
+    if (heapBarW > 79) heapBarW = 79;
+  }
+  u8g2.drawStr(0, 39, "Heap:");
+  u8g2.drawFrame(25, 32, 103, 8);
+  if (heapBarW > 0) u8g2.drawBox(26, 33, heapBarW, 6);
+
+  // Servo bar (row 6) — last !servo angle 0-90, fill matches inner frame (101px)
+  const int srvInnerW = 101;
+  int srvBarW = (lastServoDeg * srvInnerW) / 90;
+  if (srvBarW < 0) srvBarW = 0;
+  if (srvBarW > srvInnerW) srvBarW = srvInnerW;
+  u8g2.drawStr(0, 47, "Srv:");
+  u8g2.drawFrame(25, 40, 103, 8);
+  if (srvBarW > 0) u8g2.drawBox(26, 41, srvBarW, 6);
 
   // ---- Rows 7-14: eight user stats (5x7 + 1px pad = 8px rows) ----
   // Name left, status after the longest name, Bot:N right-justified. Empty slots show ---.

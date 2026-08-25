@@ -70,10 +70,10 @@ Font is **5×7** with 1px padding (**8px** per row). U8g2 `drawStr(x, y)` uses *
 |---|---|---|
 | 0 | 7 | `MiniMe`, `GW:Good` / `GW:Bad`, right-justified `HH:MM:SS` |
 | 2 | 15 | `Bot:Online` / `Bot:Idle  ` (left, 10 chars); `Www Mmm dd YYYY` (right, 15 chars, space-padded day, fixed slot) |
-| 3 | 23 | `Sig:` Wi‑Fi RSSI bar |
-| 4 | 31 | `Heap:` free memory bar (internal SRAM + 8MB PSRAM) |
-| 5 | 39 | `Srv:` servo position bar, **0–90°** (boot commands **45°**, half fill) |
-| 6 | 47 | `Up:xxxxdxxhxxm T:xxxF/xxxC` (space-padded); sensor fail: `T:--Error--` |
+| 3 | 23 | `Up:xxxxdxxhxxm T:xxxF/xxxC` (space-padded); sensor fail: `T:--Error--` |
+| 4 | 31 | `Sig:` Wi‑Fi RSSI bar |
+| 5 | 39 | `Heap:` free memory bar (internal SRAM + 8MB PSRAM) |
+| 6 | 47 | `Srv:` servo position bar, **0–90°** (boot commands **45°**, half fill) |
 | 7–14 | 55 + row×8 … 111 | Eight user rows: name, `On` / `Idle` / `DND` / `Off`, `Bot:N` (commands in the last 24 hours) |
 | 15–16 | 119 / 127 | Command / action text, or `!display` payload. **Blank when idle** |
 
