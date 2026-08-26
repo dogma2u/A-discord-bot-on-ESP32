@@ -1,34 +1,18 @@
 /*
- MiniMe Bot Commands
- Public Commands:
-• !apod — NASA Astronomy Picture of the Day.
-• !ask <question> — Asks DeepSeek (text AI reply in chat).
-• !display <text> — Writes custom text to the OLED screen.
-• !help — Shows this command list.
-• !iss — Current International Space Station position.
-• !news — Space and high-tech science headlines.
-• !physics — Latest arXiv physics papers.
-• !sysinfo — Displays system diagnostics (uptime, heap, RSSI, etc.).
-• !temp — Reads the current indoor temperature sensor.
-• !time — Displays the current bot time.
-• !weather <zip> — Fetches the weather report for a US ZIP code.
- Owner-Only Commands:
-• !led on / !led off — Controls the RGB NeoPixel LED.
-• !servo <0-90> — Moves the servo motor to a specific angle.
-• !set1 on / !set1 off — Controls digital output pin 1.
-• !set2 on / !set2 off — Controls digital output pin 2.
+ MiniMe Discord bot (ESP32-S3 + SSD1327). Command list: Discord !help.
 
- Sketch map (this file, top to bottom):
+ Sketch map (top to bottom):
  1) Config, pins, NTP / Pacific DST
- 2) Discord Gateway state + 8-user presence / 24h command counts
- 3) SSD1327 dashboard, sleep, overlays (U8g2 drawStr; y is font baseline)
+ 2) Gateway state + 8-user presence / 24h command counts
+ 3) OLED dashboard, sleep, overlays (U8g2 drawStr; y = font baseline)
  4) GPIO, servo, DS18B20, NeoPixel
  5) Discord REST, public HTTP APIs, command handler
- 6) Touch wake pad (GPIO 4) + USB VBUS ADC (GPIO 1 divider)
- 7) Gateway websocket, bot Online/Idle presence, scheduled posts, setup / loop
- Display sleep dims then blanks the OLED only. ESP32 and Wi-Fi stay running.
- Touch on GPIO 4 is polled in loop() to wake the panel (no touch interrupt).
- Bot Discord status: online on activity; idle after 5 minutes quiet. Touch does not set Online.
+ 6) Touch wake (GPIO 4) + USB VBUS ADC (GPIO 1 divider)
+ 7) Gateway websocket, bot Online/Idle, scheduled posts, setup / loop
+
+ OLED sleep dims then blanks the panel only; ESP32 and Wi-Fi stay up.
+ Touch is polled in loop() (no interrupt). Bot status: online on activity,
+ idle after 5 min quiet; touch does not set Online.
 */
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -53,15 +37,15 @@ const char* BOT_TOKEN     = "bot token";
 const char* WEATHER_API_KEY = "WEATHER_API_KEY";
 const char* NASA_API_KEY    = "NASA_API_KEY";
 const char* DEEPSEEK_API_KEY = "DEEPSEEK_API_KEY";
-// Guild to fetch members from at startup
-#define BOT_GUILD_ID "GUILD_ID"
+#define BOT_GUILD_ID "GUILD_ID"  // startup member fetch
 // ====== OWNER AND CHANNEL IDS ======
-// OWNER_ID_STR: who may run GPIO / servo.
-// TARGET_CHANNEL_ID: commands + auto sysinfo / 6-12-18 temp posts.
-// TARGET_CHANNEL_ID1: second channel that may run commands.
-const String OWNER_ID_STR        = "OWNER_ID_STR";
-const String TARGET_CHANNEL_ID  = "TARGET_CHANNEL_ID";
-const String TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";
+const String OWNER_ID_STR        = "OWNER_ID_STR";  // GPIO / servo
+const String TARGET_CHANNEL_ID  = "TARGET_CHANNEL_ID";  // commands + auto posts
+const String TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";  // second command channel
+// Discord content max is 2000. !ask max_tokens / JSON buffer sized to fit one message.
+const int DISCORD_CONTENT_MAX = 2000;
+const int DEEPSEEK_MAX_TOKENS = 900;
+const size_t DEEPSEEK_JSON_DOC = 12288;
 // ====== GPIO CONFIG ======
 // WeAct ESP32-S3-N16R8 defaults. Change here if wiring differs.
 const int RGB_LED_PIN = 48;
@@ -80,14 +64,13 @@ const uint32_t USB_VBUS_R_HI = 10000; // ohms, 5V side
 const uint32_t USB_VBUS_R_LO = 10000; // ohms, GND side
 const uint8_t TOUCH_AVG_N = 16;       // rolling idle window
 const unsigned long USB_VBUS_READ_MS = 500;
-// ====== TIME CONFIG (NTP) — US Pacific, with daylight saving ======
-// NTP is fetched as UTC, then offset to PST or PDT for the dashboard clock and scheduled posts.
+// ====== TIME CONFIG (NTP) — US Pacific DST ======
+// NTP is UTC; offset applied in updateLocalTime.
 WiFiUDP ntpUDP;
-const long PST_OFFSET_SEC = -28800; // UTC-8 standard
-const long PDT_OFFSET_SEC = -25200; // UTC-7 daylight
+const long PST_OFFSET_SEC = -28800; // UTC-8
+const long PDT_OFFSET_SEC = -25200; // UTC-7
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 
-// US Pacific DST helpers (NTP is UTC; offset applied in updateLocalTime).
 int civilDayOfWeek(int year, int month, int day) { // 0 = Sunday
   static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
   int y = year;
@@ -157,52 +140,40 @@ void noteBotActivity();
 void updateBotPresenceIdle();
 void sendBotPresence(const char* status, bool afk);
 // ====== DISPLAY STATE ======
-// Full-buffer U8g2 on SSD1327. No setCursor: drawStr(x, y) uses y as the font baseline.
-// Waveshare-style 1.5" 128x128 SSD1327. EA_W128128 shifts the picture down so
-// firmware y=0 is not the top of the glass, and y=119/127 (lines 15-16) fall off the bottom.
+// EA_W128128 shifts the picture down: firmware y=0 is not glass top; y=119/127 can clip.
 U8G2_SSD1327_WS_128X128_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 void noteDisplayActivity();
 void drawDashboard();
 
-// Dashboard live data
 float dashTempC = -999.0f;
 float dashTempF = -999.0f;
 int lastServoDeg = 45;
 
 // ====== USER TRACKING (8 dashboard rows) ======
-// Eight OLED rows: name, On/Idle/DND/Off, Bot:N (commands in the last 24h).
-// Slots fill from a startup REST member list; presence comes from the Gateway.
+// REST member list at boot; Gateway presence + 24h command counts on OLED.
 struct TrackedUser {
-  String userId;
-  String userName;
-  uint8_t status;   // 0=Off, 1=Idle, 2=On
+  String userId, userName;
+  uint8_t status;  // 0 Off, 1 Idle, 2 On, 3 DND
   uint32_t useCount24h;
   bool active;
 };
-
 static const uint8_t MAX_TRACKED_USERS = 8;
 TrackedUser trackedUsers[MAX_TRACKED_USERS];
 String cachedGuildIds[3];
 uint8_t cachedGuildCount = 0;
-
 unsigned long usesWindowStartMillis = 0;
-const unsigned long USES_WINDOW_MS = 86400UL * 1000UL; // 24 hours
+const unsigned long USES_WINDOW_MS = 86400000UL;  // 24h
 
-// Discord presence string -> dashboard status byte (0 Off, 1 Idle, 2 On, 3 DND).
-uint8_t statusFromDiscord(const char* status) {
-  if (!status) return 0;
-  if (strcmp(status, "online") == 0) return 2;
-  if (strcmp(status, "idle") == 0) return 1;
-  if (strcmp(status, "dnd") == 0) return 3;
-  if (strcmp(status, "offline") == 0) return 0;
-  return 0;
+uint8_t statusFromDiscord(const char* s) {
+  if (!s) return 0;
+  if (!strcmp(s, "online")) return 2;
+  if (!strcmp(s, "idle")) return 1;
+  if (!strcmp(s, "dnd")) return 3;
+  return 0;  // offline / unknown
 }
-
-const char* statusToWord(uint8_t status) {
-  if (status == 2) return "On";
-  if (status == 1) return "Idle";
-  if (status == 3) return "DND";
-  return "Off";
+const char* statusToWord(uint8_t s) {
+  static const char* w[] = {"Off", "Idle", "On", "DND"};
+  return s < 4 ? w[s] : "Off";
 }
 
 void initTrackedUsers() {
@@ -238,14 +209,12 @@ int findUserIndex(const String& userId) {
 }
 
 int addOrPickUserSlot(const String& userId, const String& userName) {
-  // Return existing slot if present
   int idx = findUserIndex(userId);
   if (idx >= 0) {
     if (userName.length()) trackedUsers[idx].userName = userName;
     return idx;
   }
 
-  // Find inactive slot
   for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
     if (!trackedUsers[i].active) {
       trackedUsers[i].active = true;
@@ -257,7 +226,7 @@ int addOrPickUserSlot(const String& userId, const String& userName) {
     }
   }
 
-  // No free slot: overwrite lowest-use slot.
+  // Full: overwrite lowest 24h-use slot.
   uint8_t worst = 0;
   for (uint8_t i = 1; i < MAX_TRACKED_USERS; i++) {
     if (trackedUsers[i].useCount24h < trackedUsers[worst].useCount24h) worst = i;
@@ -270,7 +239,6 @@ int addOrPickUserSlot(const String& userId, const String& userName) {
   return (int)worst;
 }
 
-// Called on each allowed command: bump 24h count and treat that user as On.
 void recordUserUse(const String& userId, const String& userName) {
   resetUseWindowIfNeeded();
   if (userId.length() == 0) return;
@@ -280,13 +248,11 @@ void recordUserUse(const String& userId, const String& userName) {
   }
   if (idx < 0) return;
   if (userName.length()) trackedUsers[idx].userName = userName;
-  // Command implies they're at least "On" from a user-experience perspective.
-  trackedUsers[idx].status = 2;
+  trackedUsers[idx].status = 2;  // command use => On on OLED
   trackedUsers[idx].useCount24h++;
   noteDisplayActivity();
 }
 
-// Apply a Gateway presences[] array to tracked users (READY / GUILD_CREATE / GUILD_MEMBERS_CHUNK).
 void applyPresencesArray(JsonArray presences) {
   if (presences.isNull()) return;
   for (JsonObject p : presences) {
@@ -299,14 +265,9 @@ void applyPresencesArray(JsonArray presences) {
     if (trackedUsers[idx].status != newSt) {
       trackedUsers[idx].status = newSt;
     }
-    // Serial.print("[PRESENCE] ");
-    // Serial.print(trackedUsers[idx].userName);
-    // Serial.print(" -> ");
-    // Serial.println(statusToWord(trackedUsers[idx].status));
   }
 }
 
-// Gateway OP 8: ask Discord for current presence of the eight tracked user IDs (each cached guild).
 void requestTrackedUserPresences() {
   if (cachedGuildCount == 0) return;
   bool any = false;
@@ -335,12 +296,9 @@ void requestTrackedUserPresences() {
     String payload;
     serializeJson(doc, payload);
     gatewayWS.sendTXT(payload);
-    // Serial.print("[GW] Request Guild Members (presences) sent for ");
-    // Serial.println(cachedGuildIds[g]);
   }
 }
 
-// Live PRESENCE_UPDATE: refresh name/status; may occupy a free dashboard slot.
 void handlePresenceUpdate(JsonObject d) {
   const char* uid = d["user"]["id"];
   const char* st  = d["status"] | "offline";
@@ -366,19 +324,18 @@ void handlePresenceUpdate(JsonObject d) {
   }
 }
 
-// Status on OLED rows 15-16 only. Dashboard stays up; these two lines show commands / !display.
+// Transient text on OLED baselines y=119 / y=127 (!display / command status).
 String transientLine1 = "";
 String transientLine2 = "";
 String transientLine3 = "";
 unsigned long transientUntilMs = 0;
 
-// Dashboard refresh + OLED sleep. Full brightness 1 min, then 15 s dim, then panel off.
 unsigned long lastDashMillis = 0;
 const unsigned long DASH_REFRESH_MS = 2000;
 unsigned long lastDisplayActivityMillis = 0;
 
-// ====== TOUCH WAKE (GPIO 4, capacitive pad) ======
-// Built-in ESP32-S3 touch on TOUCH4. Compensated raw vs rolling idle avg + constant gap.
+// ====== TOUCH WAKE (GPIO 4) ======
+// Compensated raw vs rolling idle avg + TOUCH_THRESHOLD.
 unsigned long lastTouchWakeMillis = 0;
 bool touchWasActive = false;
 uint32_t touchIdleBuf[TOUCH_AVG_N];
@@ -386,7 +343,6 @@ uint8_t touchIdleBufCount = 0;
 uint8_t touchIdleBufIdx = 0;
 uint32_t touchIdleSum = 0;
 uint32_t touchIdleAvg = 0;
-uint32_t touchRawMax = 0;
 uint32_t usbVbusRefMv = 0;
 uint32_t usbVbusMvCached = 0;
 uint32_t usbVbusCompLastMv = 0;
@@ -410,9 +366,7 @@ bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
 bool discordIdLooksValid(const String& id);
 
 // ====== DISPLAY UTILS ======
-// Wake/sleep, overlays, dashboard paint. U8g2 y is baseline (not Adafruit setCursor).
 
-// Wake the panel if it was in power-save, and restart the 1-minute idle timer.
 void noteDisplayActivity() {
   lastDisplayActivityMillis = millis();
   if (displayAsleep) {
@@ -421,10 +375,6 @@ void noteDisplayActivity() {
     lastDashMillis = 0;
   }
   u8g2.setContrast(DISPLAY_CONTRAST_FULL);
-}
-
-uint32_t readTouchRaw(uint8_t pin) {
-  return (uint32_t)touchRead(pin);
 }
 
 bool touchSampleValid(uint32_t raw) {
@@ -502,18 +452,16 @@ void calibrateTouchIdleAvg() {
   touchIdleSum = 0;
   touchIdleAvg = 0;
   for (int i = 0; i < TOUCH_AVG_N; i++) {
-    uint32_t raw = readTouchRaw(PIN_TOUCH);
+    uint32_t raw = (uint32_t)touchRead(PIN_TOUCH);
     if (touchSampleValid(raw)) touchIdlePush(compensateTouchRaw(raw));
     delay(25);
   }
   if (touchIdleBufCount == 0) {
-    uint32_t raw = readTouchRaw(PIN_TOUCH);
+    uint32_t raw = (uint32_t)touchRead(PIN_TOUCH);
     touchIdlePush(compensateTouchRaw(raw));
   }
-  touchRawMax = touchIdleAvg;
 }
 
-// Rolling idle average while not touched. Trip stays avg + TOUCH_THRESHOLD.
 void updateTouchIdleAvg(uint32_t compensated) {
   if (!touchSampleValid(compensated)) return;
   if (compensated >= touchTripPoint()) return;
@@ -528,46 +476,21 @@ void configureTouchHardware() {
 #endif
 }
 
-// Call once in setup() after WiFi/I2C — do not recalibrate earlier.
 void setupTouch() {
-  // Serial.println("--- touch init ---");
   setupUsbVbusAdc();
   configureTouchHardware();
   calibrateTouchIdleAvg();
-  // Serial.print("touch GPIO");
-  // Serial.print(PIN_TOUCH);
-  // Serial.print(" idleAvg=");
-  // Serial.print(touchIdleAvg);
-  // Serial.print(" trip=");
-  // Serial.print(touchTripPoint());
-  // Serial.print(" usbMv=");
-  // Serial.println(usbVbusRefMv);
-  // printUsbVbusSerial();
-}
-
-void printUsbVbusSerial() {
-  uint32_t mv = readUsbVbusMilliVolts();
-  (void)mv;
-  // Serial.print("usb power: ");
-  // Serial.print(mv);
-  // Serial.print(" mV  ");
-  // Serial.print(mv / 1000);
-  // Serial.print(".");
-  // uint32_t hun = (mv % 1000) / 10;
-  // if (hun < 10) Serial.print("0");
-  // Serial.print(hun);
-  // Serial.println(" V");
 }
 
 bool touchIsActive() {
-  uint32_t raw = readTouchRaw(PIN_TOUCH);
+  uint32_t raw = (uint32_t)touchRead(PIN_TOUCH);
   uint32_t compensated = compensateTouchRaw(raw);
   if (compensated >= touchTripPoint()) return true;
   updateTouchIdleAvg(compensated);
   return false;
 }
 
-// Polled pad: rising edge only. A stuck/noisy trip must not keep resetting the idle timer.
+// Rising edge only — stuck trip must not keep resetting the idle timer.
 void pollTouchWake() {
   bool active = touchIsActive();
   if (!active) {
@@ -582,7 +505,7 @@ void pollTouchWake() {
   noteDisplayActivity();
 }
 
-// After 1 minute idle, dim over 15 s, then blank the OLED. Clock/RSSI/heap ticks do not count.
+// Idle: full 1 min, dim 15 s, then blank. Clock/RSSI/heap ticks do not count as activity.
 void updateDisplaySleep() {
   if (displayAsleep) return;
   unsigned long now = millis();
@@ -606,55 +529,32 @@ void updateDisplaySleep() {
   u8g2.setPowerSave(1); // panel off until touch or a real event
 }
 
-// Queue a 2-line status (OLED rows 15-16). Dashboard is not replaced.
+// Overlay on y=119/127; do not paint here (stack + NTP unsafe inside Gateway).
 void showTransient(const String& line1, const String& line2 = "", const String& line3 = "", unsigned long durationMs = 3000) {
   noteDisplayActivity();
   transientLine1 = line1;
   transientLine2 = line2;
   transientLine3 = line3;
   transientUntilMs = millis() + durationMs;
-  lastDashMillis = 0; // loop/updateDisplay paints; do not draw here (stack + NTP inside Gateway)
+  lastDashMillis = 0;
 }
 
-// Draw the persistent dashboard (128x128 SSD1327)
-// U8g2 drawStr(x, y): y is the FONT BASELINE, not the top of the glyph and not setCursor.
-// 5x7 font is 7px tall, so header at y=7 sits on the top of the panel (pixels ~0-6).
-// Font: u8g2_font_5x7_tf = 5px wide + 1px gap = 6px/char, 7px tall + 1px gap = 8px/row
-// Grid: 16 rows x 18 chars on 128x128
-// Row baselines (y = row*8, glyph baseline at y+7):
-//   Row 0  y=7   Header: MiniMe + GW:good/bad + right-justified time
-//   Row 2  y=15  Bot:Online/Idle (left, 10) + Www Mmm dd YYYY (right, 15; fixed slot)
-//   Row 3  y=23  Sig bar
-//   Row 4  y=31  Heap bar
-//   Row 5  y=39  Srv bar (0-90 deg)
-//   Row 6  y=47  Up:xxxxdxxhxxm T:xxxF/xxxC  (or T:--Error--; space-padded)
-//   Row 7  y=55  User1
-//   Row 8  y=63  User2
-//   Row 9  y=71  User3
-//   Row 10 y=79  User4
-//   Row 11 y=87  User5
-//   Row 12 y=95  User6
-//   Row 13 y=103 User7
-//   Row 14 y=111 User8
-//   Row 15 y=119 command / !display text (blank when idle)
-//   Row 16 y=127 command / !display text (blank when idle)
+// 5x7 → 6px/char, 8px/row. drawStr y = baseline.
+// y=7 header | 15 bot+date | 23 up/temp | 31 sig | 39 heap | 47 srv
+// y=55..111 users | 119/127 transient
 void drawDashboard() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_5x7_tf);
 
-  // ---- Row 0: Header (MiniMe + GW + right-justified time) ----
   updateLocalTime();
-  String t = timeClient.getFormattedTime(); // HH:MM:SS
+  String t = timeClient.getFormattedTime();
   String gwHeader = gatewayConnected ? "GW:Good" : "GW:Bad";
   u8g2.drawStr(0, 7, "MiniMe");
   u8g2.drawStr(42, 7, gwHeader.c_str());
-  // True right-justify using actual rendered width.
   int timeX = 128 - u8g2.getStrWidth(t.c_str());
   if (timeX < 0) timeX = 0;
   u8g2.drawStr(timeX, 7, t.c_str());
 
-  // ---- Row 2: Bot Online/Idle left; DOW Mon day year right (fixed widths, no shifting) ----
-  // 25 chars total: "Bot:Online" (10) + "Thu Aug 20 2026" (15). Day space-padded (%2d).
   {
     static const char* const DOW_NAME[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
     static const char* const MON_NAME[] = {"Jan","Feb","Mar","Apr","May","Jun",
@@ -671,14 +571,13 @@ void drawDashboard() {
     snprintf(dateBuf, sizeof(dateBuf), "%s %s %2d %04d",
              DOW_NAME[tmLocal.tm_wday], MON_NAME[tmLocal.tm_mon],
              tmLocal.tm_mday, tmLocal.tm_year + 1900);
-    // Right-justify against a constant slot width so DOW never moves.
+    // Fixed slot width so DOW column does not shift.
     const char* dateSlot = "Www Mmm 99 9999";
     int dateX = 128 - u8g2.getStrWidth(dateSlot);
     if (dateX < 0) dateX = 0;
     u8g2.drawStr(dateX, 15, dateBuf);
   }
 
-  // ---- Row 3: Up + Temp — Up:xxxxdxxhxxm T:xxxF/xxxC (space-pad, no leading zeros) ----
   unsigned long uptimeSec = millis() / 1000;
   unsigned long d = uptimeSec / 86400;
   unsigned long h = (uptimeSec % 86400) / 3600;
@@ -693,12 +592,10 @@ void drawDashboard() {
   }
   u8g2.drawStr(0, 23, upTempBuf);
 
-  // ---- Rows 4-6: Signal + Heap + Servo bars ----
   long rssi = WiFi.RSSI();
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t totalHeap = ESP.getHeapSize();
 
-  // Signal bar (row 4)
   int sigBarW = 0;
   if (rssi >= -40) sigBarW = 79;
   else if (rssi <= -100) sigBarW = 0;
@@ -707,7 +604,6 @@ void drawDashboard() {
   u8g2.drawFrame(25, 24, 103, 8);
   if (sigBarW > 0) u8g2.drawBox(26, 25, sigBarW, 6);
 
-  // Heap bar (row 5) — internal SRAM + this board's 8MB PSRAM, original 8px height
   uint32_t psramSize = ESP.getPsramSize();
   uint32_t psramFree = ESP.getFreePsram();
   if (psramSize < BOARD_PSRAM_BYTES) psramSize = BOARD_PSRAM_BYTES;
@@ -724,7 +620,6 @@ void drawDashboard() {
   u8g2.drawFrame(25, 32, 103, 8);
   if (heapBarW > 0) u8g2.drawBox(26, 33, heapBarW, 6);
 
-  // Servo bar (row 6) — last !servo angle 0-90, fill matches inner frame (101px)
   const int srvInnerW = 101;
   int srvBarW = (lastServoDeg * srvInnerW) / 90;
   if (srvBarW < 0) srvBarW = 0;
@@ -733,9 +628,6 @@ void drawDashboard() {
   u8g2.drawFrame(25, 40, 103, 8);
   if (srvBarW > 0) u8g2.drawBox(26, 41, srvBarW, 6);
 
-  // ---- Rows 7-14: eight user stats (5x7 + 1px pad = 8px rows) ----
-  // Name left, status after the longest name, Bot:N right-justified. Empty slots show ---.
-  u8g2.setFont(u8g2_font_5x7_tf);
   const int gapPx = 4;
   const int statusW = u8g2.getStrWidth("Idle");
   const int botReserveW = u8g2.getStrWidth("Bot:999");
@@ -759,7 +651,7 @@ void drawDashboard() {
   int statusX = longestNamePx + gapPx;
 
   for (uint8_t row = 0; row < MAX_TRACKED_USERS; row++) {
-    uint8_t y = 55 + (row * 8); // baseline: 55, 63, 71, 79, 87, 95, 103, 111
+    uint8_t y = 55 + (row * 8);
     String name = names[row];
     while (name.length() > 1 && u8g2.getStrWidth(name.c_str()) > longestNamePx) {
       name.remove(name.length() - 1);
@@ -776,7 +668,6 @@ void drawDashboard() {
     u8g2.drawStr(botX, y, botStr.c_str());
   }
 
-  u8g2.setFont(u8g2_font_5x7_tf);
   String row15 = "";
   String row16 = "";
   if (millis() < transientUntilMs) {
@@ -793,7 +684,6 @@ void drawDashboard() {
   u8g2.sendBuffer();
 }
 
-// Called from loop: sleep check, then 2s dashboard refresh (rows 15-16 show events while active).
 void updateDisplay() {
   updateDisplaySleep();
   if (displayAsleep) return;
@@ -804,7 +694,6 @@ void updateDisplay() {
   }
   if (lastDashMillis == 0 || now - lastDashMillis >= DASH_REFRESH_MS) {
     lastDashMillis = now;
-    // Refresh temp reading for dashboard
     float c, f;
     if (readTemperature(c, f)) {
       dashTempC = c;
@@ -812,11 +701,6 @@ void updateDisplay() {
     }
     drawDashboard();
   }
-}
-
-// Legacy helper kept for boot/connect messages that need an immediate paint
-void drawStatus(const String& line1, const String& line2 = "", const String& line3 = "") {
-  showTransient(line1, line2, line3, 3000);
 }
 
 // ====== SERVO (LEDC 50Hz PWM, owner !servo 0-90) ======
@@ -850,7 +734,6 @@ void setServoAngle(int angleDeg) {
   ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
   ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
-// Boot: NeoPixel, set1/set2 outputs, servo parked at 45 degrees.
 void setupPins() {
   pinMode(RGB_LED_PIN, OUTPUT);
   digitalWrite(RGB_LED_PIN, LOW);
@@ -864,7 +747,7 @@ void setupPins() {
   setupServo();
   setServoAngle(45);
 }
-// DS18B20 read for dashboard, !temp, and scheduled summaries.
+
 bool readTemperature(float &tempC, float &tempF) {
   pinMode(PIN_DS18B20, INPUT_PULLUP);
   sensors.requestTemperatures();
@@ -877,9 +760,7 @@ bool readTemperature(float &tempC, float &tempF) {
   return true;
 }
 // ====== DISCORD REST ======
-// HTTPS to discord.com: outbound chat, member fetch, channel lookup.
 
-// Discord body for !sysinfo and the 4-hour auto post (heap includes 8MB PSRAM).
 String getSystemInfo() {
   long rssi = WiFi.RSSI();
   uint32_t psramSize = ESP.getPsramSize();
@@ -902,22 +783,19 @@ String getSystemInfo() {
          "• **USB VBUS:** " + String((float)readUsbVbusMilliVolts() / 1000.0f, 3) + " V\n"
          "• **Firmware:** https://github.com/dogma2u/A-discord-bot-on-ESP32";
 }
-// Discord REST: POST a chat message to a channel (content max 2000 chars).
-bool httpsInUse = false; // blocks re-entrant REST while DeepSeek (or other) holds httpsClient
+bool httpsInUse = false; // blocks re-entrant REST while DeepSeek holds httpsClient
 bool sendDiscordMessage(const String& channelId, const String& content, bool suppressEmbeds = false) {
   if (httpsInUse) return false;
   String post = content;
-  if (post.length() > 2000) post = post.substring(0, 1997) + "...";
+  if (post.length() > DISCORD_CONTENT_MAX) post = post.substring(0, DISCORD_CONTENT_MAX - 3) + "...";
   httpsInUse = true;
   httpsClient.stop();
   httpsClient.setInsecure();
   if (!httpsClient.connect("discord.com", 443)) {
-    // Serial.println("[REST] HTTPS connect failed");
     httpsInUse = false;
     return false;
   }
   String url = "/api/v10/channels/" + channelId + "/messages";
-  // 4096 fits Discord's 2000-char content plus JSON overhead.
   StaticJsonDocument<4096> doc;
   doc["content"] = post;
   doc["tts"] = false;
@@ -956,7 +834,6 @@ bool sendDiscordMessage(const String& channelId, const String& content, bool sup
   if (sp >= 0) code = statusLine.substring(sp + 1).toInt();
   return code >= 200 && code < 300;
 }
-// Gateway OP 3: set MiniMe's Discord Online / Idle status.
 void sendBotPresence(const char* status, bool afk) {
   if (!gatewayConnected || !identified) return;
   StaticJsonDocument<256> doc;
@@ -971,7 +848,6 @@ void sendBotPresence(const char* status, bool afk) {
   gatewayWS.sendTXT(payload);
 }
 
-// Mark activity: Online on Discord; restart the 5-minute idle timer.
 void noteBotActivity() {
   lastBotActivityMillis = millis();
   if (!gatewayConnected || !identified) return;
@@ -981,7 +857,6 @@ void noteBotActivity() {
   sendBotPresence("online", false);
 }
 
-// After 5 minutes with no activity, set Discord status to Idle.
 void updateBotPresenceIdle() {
   if (!gatewayConnected || !identified) return;
   if (lastBotActivityMillis == 0) {
@@ -995,17 +870,14 @@ void updateBotPresenceIdle() {
   sendBotPresence("idle", true);
 }
 
-// 80 MHz only when OLED is off and Discord status is Idle. Wi-Fi needs >= 80 MHz.
+// 80 MHz only when OLED off and Discord Idle. Wi-Fi needs >= 80 MHz.
 void applyCpuForIdleState() {
   bool slow = displayAsleep && botDiscordStatus == 1 && identified;
   uint32_t want = slow ? CPU_MHZ_OLED_OFF_BOT_IDLE : CPU_MHZ_ACTIVE;
   if (getCpuFrequencyMhz() == want) return;
   setCpuFrequencyMhz(want);
-  // Serial.print("cpu MHz=");
-  // Serial.println(getCpuFrequencyMhz());
 }
 
-// Gateway OP 2 IDENTIFY after HELLO. Intents 37635 include members + presences + message content.
 void sendIdentify() {
   StaticJsonDocument<1024> doc;
   doc["op"] = 2;
@@ -1017,8 +889,7 @@ void sendIdentify() {
   props["device"]  = "esp32";
   d["compress"]         = false;
   d["large_threshold"] = 250;
-  // Include PRESENCE_UPDATE so we can show "online" status on the display.
-  d["intents"] = 37635; // GUILDS + GUILD_MEMBERS + GUILD_PRESENCES + GUILD_MESSAGES + DIRECT_MESSAGES + MESSAGE_CONTENT
+  d["intents"] = 37635; // GUILDS + MEMBERS + PRESENCES + MESSAGES + DMs + MESSAGE_CONTENT
   JsonObject presence = d.createNestedObject("presence");
   presence["since"] = nullptr;
   presence.createNestedArray("activities");
@@ -1030,9 +901,8 @@ void sendIdentify() {
   lastBotActivityMillis = millis();
   botDiscordStatus = 2;
   botDiscordStatusSent = true;
-  // Serial.println("[GW] IDENTIFY sent");
 }
-// Gateway OP 1 keep-alive. Interval comes from HELLO (op 10).
+
 void sendHeartbeat() {
   StaticJsonDocument<256> doc;
   doc["op"] = 1;
@@ -1044,7 +914,6 @@ void sendHeartbeat() {
   String payload;
   serializeJson(doc, payload);
   gatewayWS.sendTXT(payload);
-  // Serial.println("[GW] HEARTBEAT sent");
 }
 void pumpGateway() {
   gatewayWS.loop();
@@ -1114,7 +983,6 @@ bool skipHttpHeaders(Client& client, unsigned long timeoutMs) {
   return true;
 }
 
-// Snowflake IDs are digit strings (user, channel, guild).
 bool discordIdLooksValid(const String& id) {
   if (id.length() < 16) return false;
   for (unsigned int i = 0; i < id.length(); i++) {
@@ -1124,7 +992,6 @@ bool discordIdLooksValid(const String& id) {
   return true;
 }
 
-// Discord REST GET helper (members, channel lookup). Handles chunked bodies.
 bool discordRestGet(const String& path, String& outBody, String& outStatus) {
   outBody = "";
   httpsClient.stop();
@@ -1174,20 +1041,15 @@ bool discordRestGet(const String& path, String& outBody, String& outStatus) {
   return ok;
 }
 
-// Look up a channel's guild id via REST.
 String guildIdFromChannel(const String& channelId) {
   if (!discordIdLooksValid(channelId)) return "";
 
   String body, status;
   if (!discordRestGet("/api/v10/channels/" + channelId, body, status)) {
-    // Serial.print("[MEMBERS] channel lookup failed: ");
-    // Serial.println(status);
     return "";
   }
   int jsonStart = body.indexOf('{');
   if (jsonStart < 0) {
-    // Serial.print("[MEMBERS] channel lookup: no JSON. ");
-    // Serial.println(status);
     return "";
   }
   if (jsonStart > 0) body = body.substring(jsonStart);
@@ -1197,13 +1059,9 @@ String guildIdFromChannel(const String& channelId) {
   StaticJsonDocument<512> doc;
   DeserializationError err = deserializeJson(doc, body, DeserializationOption::Filter(filter));
   if (err) {
-    // Serial.print("[MEMBERS] channel JSON error: ");
-    // Serial.println(err.c_str());
     return "";
   }
   String gid = doc["guild_id"] | "";
-  // Serial.print("[MEMBERS] guild from channel: ");
-  // Serial.println(gid);
   return gid;
 }
 
@@ -1218,25 +1076,18 @@ void rememberGuildId(const String& gid) {
   cachedGuildIds[cachedGuildCount++] = id;
 }
 
-// Append non-bot members from one guild into free OLED slots (skip users already loaded).
 bool appendMembersFromGuild(const String& guildId, uint8_t maxToAdd) {
   if (!discordIdLooksValid(guildId)) return false;
 
   String body, status;
   String path = "/api/v10/guilds/" + guildId + "/members?limit=200";
   if (!discordRestGet(path, body, status)) {
-    // Serial.print("[MEMBERS] fetch failed: ");
-    // Serial.println(status);
     return false;
   }
-  // Serial.print("[MEMBERS] HTTP ");
-  // Serial.println(status);
 
   int jsonStart = body.indexOf('[');
   int objStart = body.indexOf('{');
   if (jsonStart < 0 || (objStart >= 0 && objStart < jsonStart)) {
-    // Serial.print("[MEMBERS] not a member array: ");
-    // Serial.println(body.substring(0, 180));
     return false;
   }
   if (jsonStart > 0) body = body.substring(jsonStart);
@@ -1251,14 +1102,11 @@ bool appendMembersFromGuild(const String& guildId, uint8_t maxToAdd) {
   DynamicJsonDocument doc(8192);
   DeserializationError err = deserializeJson(doc, body, DeserializationOption::Filter(filter));
   if (err) {
-    // Serial.print("[MEMBERS] JSON parse error: ");
-    // Serial.println(err.c_str());
     return false;
   }
 
   JsonArray members = doc.as<JsonArray>();
   if (members.isNull()) {
-    // Serial.println("[MEMBERS] no member array");
     return false;
   }
 
@@ -1282,19 +1130,12 @@ bool appendMembersFromGuild(const String& guildId, uint8_t maxToAdd) {
     trackedUsers[slot].userName = name;
     trackedUsers[slot].status = 0;
     trackedUsers[slot].useCount24h = 0;
-    // Serial.print("[MEMBERS] ");
-    // Serial.print(slot);
-    // Serial.print(": ");
-    // Serial.println(name);
     added++;
   }
 
-  // Serial.print("[MEMBERS] added from guild: ");
-  // Serial.println(added);
   return added > 0;
 }
 
-// Boot: load members from BOT_GUILD_ID and both command-channel guilds (two servers).
 bool fetchGuildMembersAtStartup() {
   initTrackedUsers();
   cachedGuildCount = 0;
@@ -1303,7 +1144,6 @@ bool fetchGuildMembersAtStartup() {
   rememberGuildId(guildIdFromChannel(String(TARGET_CHANNEL_ID1)));
 
   if (cachedGuildCount == 0) {
-    // Serial.println("[MEMBERS] no valid BOT_GUILD_ID or channel guilds");
     return false;
   }
 
@@ -1316,12 +1156,6 @@ bool fetchGuildMembersAtStartup() {
   for (uint8_t g = 0; g < cachedGuildCount; g++) {
     if (appendMembersFromGuild(cachedGuildIds[g], MAX_TRACKED_USERS)) any = true;
   }
-  uint8_t n = 0;
-  for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
-    if (trackedUsers[i].active) n++;
-  }
-  // Serial.print("[MEMBERS] loaded users: ");
-  // Serial.println(n);
   return any;
 }
 
@@ -1340,7 +1174,7 @@ String truncateText(const String& s, int maxLen) {
   if (s.length() <= maxLen) return s;
   return s.substring(0, maxLen - 3) + "...";
 }
-// !news — Spaceflight News API, 3 headlines.
+
 bool getScienceNews(String& outReport) {
   httpsClient.stop();
   httpsClient.setInsecure();
@@ -1388,7 +1222,6 @@ bool getScienceNews(String& outReport) {
   }
   return n > 0;
 }
-// !physics — arXiv cat:physics, 3 newest papers.
 bool getPhysicsPapers(String& outReport) {
   httpsClient.stop();
   httpsClient.setInsecure();
@@ -1455,7 +1288,6 @@ bool getPhysicsPapers(String& outReport) {
   }
   return true;
 }
-// !apod — NASA Astronomy Picture of the Day.
 bool getApod(String& outReport) {
   httpsClient.stop();
   httpsClient.setInsecure();
@@ -1495,7 +1327,6 @@ bool getApod(String& outReport) {
   if (url.length()) outReport += "\n" + url;
   return true;
 }
-// !iss — Open Notify ISS lat/lon.
 bool getIssPosition(String& outReport) {
   WiFiClient client;
   if (!client.connect("api.open-notify.org", 80)) {
@@ -1525,12 +1356,10 @@ bool getIssPosition(String& outReport) {
               "• **Longitude:** " + lon;
   return true;
 }
-// !ask DeepSeek: queued from Gateway callback, HTTPS from loop().
 bool askNeedPost = false;
 String askPendingQuestion;
 String askPendingChannelId;
 
-// Shared HTTP body reader (chunked or Content-Length). Used by Discord REST and DeepSeek.
 bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
                               String& outBody, unsigned long deadlineMs) {
   outBody = "";
@@ -1589,7 +1418,6 @@ bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
   }
   return outBody.length() > 0;
 }
-// !ask — DeepSeek chat completion (max_tokens 900; Discord post capped at 2000 chars).
 bool askDeepSeek(const String& question, String& outReport) {
   if (DEEPSEEK_API_KEY == nullptr || strlen(DEEPSEEK_API_KEY) == 0 ||
       strcmp(DEEPSEEK_API_KEY, "DEEPSEEK_API_KEY") == 0) {
@@ -1607,28 +1435,25 @@ bool askDeepSeek(const String& question, String& outReport) {
   }
   StaticJsonDocument<1536> req;
   req["model"] = "deepseek-chat";
-  req["max_tokens"] = 900;
+  req["max_tokens"] = DEEPSEEK_MAX_TOKENS;
   req["temperature"] = 0.7;
   req["stream"] = false;
   JsonArray messages = req.createNestedArray("messages");
   JsonObject sys = messages.createNestedObject();
   sys["role"] = "system";
-  sys["content"] = "You are MiniMe on an ESP32 Discord bot. Answer clearly for science, tech, and physics. Keep the full answer under 1800 characters so it fits one Discord message.";
+  sys["content"] = "You are MiniMe on an ESP32 Discord bot. Answer clearly for science, tech, and physics. Keep the full answer under 2000 characters so it fits one Discord message.";
   JsonObject user = messages.createNestedObject();
   user["role"] = "user";
   user["content"] = q;
   String body;
   serializeJson(req, body);
-  // Serial.println("[ASK] TLS connect api.deepseek.com");
   httpsClient.stop();
   httpsClient.setInsecure();
   httpsClient.setTimeout(25000);
   if (!httpsClient.connect("api.deepseek.com", 443)) {
     outReport = "DeepSeek connection failed.";
-    // Serial.println("[ASK] TLS connect failed");
     return false;
   }
-  // Serial.println("[ASK] POST /chat/completions");
   String request =
     "POST /chat/completions HTTP/1.1\r\n"
     "Host: api.deepseek.com\r\n"
@@ -1685,7 +1510,7 @@ bool askDeepSeek(const String& question, String& outReport) {
   StaticJsonDocument<128> filter;
   filter["choices"][0]["message"]["content"] = true;
   filter["error"]["message"] = true;
-  StaticJsonDocument<12288> doc;
+  StaticJsonDocument<DEEPSEEK_JSON_DOC> doc;
   DeserializationError err = deserializeJson(doc, respBody, DeserializationOption::Filter(filter));
   if (err) {
     outReport = "DeepSeek JSON parse error (" + String(err.c_str()) + ").";
@@ -1724,7 +1549,7 @@ bool askDeepSeek(const String& question, String& outReport) {
     return false;
   }
   const char* prefix = "🧠 **DeepSeek:**\n";
-  int room = 2000 - (int)strlen(prefix);
+  int room = DISCORD_CONTENT_MAX - (int)strlen(prefix);
   if (room < 100) room = 100;
   outReport = String(prefix) + truncateText(answer, room);
   return true;
@@ -1740,10 +1565,9 @@ void runAskFromLoop() {
   askPendingQuestion = "";
   askPendingChannelId = "";
   if (!sendDiscordMessage(channelId, report)) {
-    // Short fallback so the user always sees something if the long post was rejected.
     String fallback = ok
       ? "DeepSeek answered, but Discord rejected the post (try a shorter question)."
-      : truncateText(report, 1800);
+      : truncateText(report, DISCORD_CONTENT_MAX);
     if (!sendDiscordMessage(channelId, fallback)) {
       showTransient("DeepSeek", "Post fail");
       return;
@@ -1755,12 +1579,11 @@ void runAskFromLoop() {
     showTransient("DeepSeek", "Error");
   }
 }
+
 // ====== DISCORD COMMAND DISPATCH ======
-// Public commands first; anything else requires OWNER_ID_STR.
 void handleCommand(const String& content, const String& authorId, const String& authorName,
                    const String& channelId, bool isDM)
 {
-  // Reply only in DMs, TARGET_CHANNEL_ID, or TARGET_CHANNEL_ID1
   if (!isDM && channelId != TARGET_CHANNEL_ID && channelId != TARGET_CHANNEL_ID1) {
     return;
   }
@@ -1780,7 +1603,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
       bang = i;
       break;
     }
-    if (bang < 0) return; // normal chat — ignore
+    if (bang < 0) return;
     raw = raw.substring(bang);
     midLine = true;
   }
@@ -1789,10 +1612,9 @@ void handleCommand(const String& content, const String& authorId, const String& 
   int spIdx = raw.indexOf(' ');
   String cmdWord = (spIdx > 0) ? raw.substring(0, spIdx) : raw;
   String args = (spIdx > 0) ? raw.substring(spIdx + 1) : "";
-  cmdWord.toLowerCase(); // command only — leave args as typed
+  cmdWord.toLowerCase();
   args.trim();
-  // Mid-sentence: keep only the next word for one-word args (!led on, !weather zip, …).
-  // !ask / !display still use the rest of the line as the payload.
+  // Mid-line bang: one-word args only (!led on, !weather zip). !ask / !display keep rest of line.
   if (midLine && args.length() > 0 &&
       cmdWord != "!ask" && cmdWord != "!display") {
     int argSp = args.indexOf(' ');
@@ -1807,7 +1629,6 @@ void handleCommand(const String& content, const String& authorId, const String& 
     }
   }
 
-  // Count this command usage for dashboard (reset happens every 24h).
   recordUserUse(authorId, authorName);
 
   if (cmdWord == "!help") {
@@ -1951,7 +1772,6 @@ void handleCommand(const String& content, const String& authorId, const String& 
     askPendingChannelId = channelId;
     askNeedPost = true;
     showTransient("DeepSeek", "Queued");
-    // Serial.println("[ASK] queued (HTTPS from loop)");
     return;
   }
   if (cmdWord == "!display") {
@@ -1972,7 +1792,6 @@ void handleCommand(const String& content, const String& authorId, const String& 
     char d = cmdWord.charAt(4);
     if (d == '1' || d == '2') setN = d - '0';
   }
-  // Owner-only hardware: LED, set1/set2, servo.
   if (cmdWord == "!led" || setN != 0 || cmdWord == "!servo") {
     if (!isOwner(authorId)) {
       if (!isDM) {
@@ -2036,19 +1855,16 @@ void handleCommand(const String& content, const String& authorId, const String& 
   showTransient("Unknown", cmdWord);
 }
 // ====== DISCORD GATEWAY WEBSOCKET ======
-// HELLO -> IDENTIFY; READY / GUILD_* / PRESENCE_UPDATE for OLED; MESSAGE_CREATE -> handleCommand.
 void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED:
       gatewayConnected = false;
       identified       = false;
       botDiscordStatusSent = false;
-      // Serial.println("[GW] DISCONNECTED");
       showTransient("Gateway", "Disconnected");
       break;
     case WStype_CONNECTED:
       gatewayConnected = true;
-      // Serial.println("[GW] CONNECTED");
       showTransient("Gateway", "Connected");
       break;
     case WStype_TEXT: {
@@ -2141,18 +1957,16 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
   }
 }
 // ====== SCHEDULED POSTS (loop) ======
-// Auto Discord posts: 4-hour sysinfo; 06:00 / 12:00 / 18:00 Pacific indoor temp.
 void backgroundTasks() {
   runAskFromLoop();
   unsigned long now = millis();
-  // Every 4 hours: System Health Report (wait for Gateway so boot post is not "Disconnected")
+  // Wait for Gateway so boot sysinfo is not "Disconnected"
   if (gatewayConnected && identified &&
       (lastSysInfoMillis == 0 || now - lastSysInfoMillis >= SYSINFO_INTERVAL_MS)) {
     lastSysInfoMillis = now;
     noteBotActivity();
     sendDiscordMessage(TARGET_CHANNEL_ID, getSystemInfo(), true);
   }
-  // Scheduled Daily Summaries (6 AM, 12 PM, 6 PM)
   updateLocalTime();
   int currentHour = timeClient.getHours();
   int currentMinute = timeClient.getMinutes();
@@ -2177,59 +1991,51 @@ void backgroundTasks() {
   }
 }
 // ====== SETUP / LOOP ======
-// Boot order: serial, PSRAM, OLED, pins, Wi-Fi, NTP, members, Gateway, touch, dashboard.
-
-// Station Wi-Fi. Blocks until connected (OLED shows Connecting / Connected).
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  drawStatus("WiFi", "Connecting...");
+  showTransient("WiFi", "Connecting...");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
   }
-  drawStatus("WiFi", "Connected");
+  showTransient("WiFi", "Connected");
 }
-// Discord Gateway websocket (JSON encoding, auto-reconnect 5s).
+
 void connectGateway() {
   gatewayWS.beginSSL("gateway.discord.gg", 443, "/?v=10&encoding=json");
   gatewayWS.onEvent(gatewayEvent);
   gatewayWS.setReconnectInterval(5000);
 }
-// Boot: serial, PSRAM JSON, OLED, pins, Wi-Fi, NTP, member list, then Gateway.
+
 void setup() {
-  // Serial.begin(115200); // testing only
   delay(500);
-  // Serial.print("PSRAM size: ");
-  // Serial.println(ESP.getPsramSize());
   gwDoc = new DynamicJsonDocument(GW_DOC_PSRAM);
-  // Serial.print("GW JSON cap: ");
-  // Serial.println(gwDoc->capacity());
   initTrackedUsers();
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   u8g2.begin();
   u8g2.setContrast(DISPLAY_CONTRAST_FULL);
   lastDisplayActivityMillis = millis();
-  drawStatus("Booting...", "ESP32-S3 Discord bot");
+  showTransient("Booting...", "ESP32-S3 Discord bot");
   setupPins();
   sensors.begin();
   connectWiFi();
   timeClient.begin();
-  drawStatus("Discord", "Loading users...");
+  showTransient("Discord", "Loading users...");
   if (fetchGuildMembersAtStartup()) {
     String n0 = trackedUsers[0].userName.length() ? trackedUsers[0].userName : "ok";
-    drawStatus("Users loaded", n0);
+    showTransient("Users loaded", n0);
   } else {
-    drawStatus("Users", "Fetch failed");
+    showTransient("Users", "Fetch failed");
   }
   delay(1200);
   connectGateway();
   setServoAngle(45);
   lastDashMillis = 0;
-  setupTouch(); // once, after WiFi/I2C — do not recalibrate earlier
-  drawStatus("Ready", "Idle presence");
+  setupTouch(); // after WiFi/I2C
+  showTransient("Ready", "Idle presence");
   drawDashboard();
 }
-// Gateway pump, heartbeat, scheduled posts, OLED refresh/sleep. MCU never sleeps here.
+
 void loop() {
   pumpGateway();
   applyCpuForIdleState();
