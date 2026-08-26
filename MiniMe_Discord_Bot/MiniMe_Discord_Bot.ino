@@ -39,9 +39,9 @@ const char* NASA_API_KEY    = "NASA_API_KEY";
 const char* DEEPSEEK_API_KEY = "DEEPSEEK_API_KEY";
 #define BOT_GUILD_ID "GUILD_ID"  // startup member fetch
 // ====== OWNER AND CHANNEL IDS ======
-const String OWNER_ID_STR        = "OWNER_ID_STR";  // GPIO / servo
-const String TARGET_CHANNEL_ID  = "TARGET_CHANNEL_ID";  // commands + auto posts
-const String TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";  // second command channel
+const char* OWNER_ID_STR        = "OWNER_ID_STR";  // GPIO / servo
+const char* TARGET_CHANNEL_ID  = "TARGET_CHANNEL_ID";  // commands + auto posts
+const char* TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";  // second command channel
 // Discord content max is 2000. !ask max_tokens / JSON buffer sized to fit one message.
 const int DISCORD_CONTENT_MAX = 2000;
 const int DEEPSEEK_MAX_TOKENS = 900;
@@ -176,14 +176,24 @@ const char* statusToWord(uint8_t s) {
   return s < 4 ? w[s] : "Off";
 }
 
+void clearTrackedSlot(uint8_t i) {
+  trackedUsers[i].active = false;
+  trackedUsers[i].userId = "";
+  trackedUsers[i].userName = "";
+  trackedUsers[i].status = 0;
+  trackedUsers[i].useCount24h = 0;
+}
+
+void fillTrackedSlot(uint8_t i, const String& userId, const String& userName) {
+  trackedUsers[i].active = true;
+  trackedUsers[i].userId = userId;
+  trackedUsers[i].userName = userName;
+  trackedUsers[i].status = 0;
+  trackedUsers[i].useCount24h = 0;
+}
+
 void initTrackedUsers() {
-  for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
-    trackedUsers[i].active = false;
-    trackedUsers[i].userId = "";
-    trackedUsers[i].userName = "";
-    trackedUsers[i].status = 0;
-    trackedUsers[i].useCount24h = 0;
-  }
+  for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) clearTrackedSlot(i);
 }
 
 void resetUseWindowIfNeeded() {
@@ -217,11 +227,7 @@ int addOrPickUserSlot(const String& userId, const String& userName) {
 
   for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
     if (!trackedUsers[i].active) {
-      trackedUsers[i].active = true;
-      trackedUsers[i].userId = userId;
-      trackedUsers[i].userName = userName;
-      trackedUsers[i].status = 0;
-      trackedUsers[i].useCount24h = 0;
+      fillTrackedSlot(i, userId, userName);
       return (int)i;
     }
   }
@@ -231,11 +237,7 @@ int addOrPickUserSlot(const String& userId, const String& userName) {
   for (uint8_t i = 1; i < MAX_TRACKED_USERS; i++) {
     if (trackedUsers[i].useCount24h < trackedUsers[worst].useCount24h) worst = i;
   }
-  trackedUsers[worst].active = true;
-  trackedUsers[worst].userId = userId;
-  trackedUsers[worst].userName = userName;
-  trackedUsers[worst].status = 0;
-  trackedUsers[worst].useCount24h = 0;
+  fillTrackedSlot(worst, userId, userName);
   return (int)worst;
 }
 
@@ -261,10 +263,7 @@ void applyPresencesArray(JsonArray presences) {
     int idx = findUserIndex(String(uid));
     if (idx < 0) continue;
     const char* st = p["status"] | "offline";
-    uint8_t newSt = statusFromDiscord(st);
-    if (trackedUsers[idx].status != newSt) {
-      trackedUsers[idx].status = newSt;
-    }
+    trackedUsers[idx].status = statusFromDiscord(st);
   }
 }
 
@@ -299,29 +298,25 @@ void requestTrackedUserPresences() {
   }
 }
 
+String discordDisplayName(JsonVariantConst user) {
+  String name = user["global_name"] | "";
+  if (name.length() == 0) name = user["username"] | "";
+  return name;
+}
+
 void handlePresenceUpdate(JsonObject d) {
   const char* uid = d["user"]["id"];
   const char* st  = d["status"] | "offline";
   if (!uid) return;
 
+  String name = discordDisplayName(d["user"]);
   int idx = findUserIndex(String(uid));
   if (idx < 0) {
-    String name = d["user"]["global_name"] | "";
-    if (name.length() == 0) {
-      name = d["user"]["username"] | "";
-    }
     idx = addOrPickUserSlot(String(uid), name);
     if (idx < 0) return;
   }
-  String pName = d["user"]["global_name"] | "";
-  if (pName.length() == 0) {
-    pName = d["user"]["username"] | "";
-  }
-  if (pName.length()) trackedUsers[idx].userName = pName;
-  uint8_t newSt = statusFromDiscord(st);
-  if (trackedUsers[idx].status != newSt) {
-    trackedUsers[idx].status = newSt;
-  }
+  if (name.length()) trackedUsers[idx].userName = name;
+  trackedUsers[idx].status = statusFromDiscord(st);
 }
 
 // Transient text on OLED baselines y=119 / y=127 (!display / command status).
@@ -364,6 +359,15 @@ bool readTemperature(float &tempC, float &tempF);
 bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
                               String& outBody, unsigned long deadlineMs);
 bool discordIdLooksValid(const String& id);
+bool httpsConnect(const char* host, uint32_t timeoutMs = 15000);
+bool httpsGetOpen(const char* host, const String& path, unsigned long headerTimeoutMs,
+                  const char* userAgent = "MiniMeBot/1.0",
+                  const char* extraHeaders = nullptr);
+bool httpGetOpen(WiFiClient& client, const char* host, const String& path, unsigned long headerTimeoutMs);
+bool httpsAwaitHeaders(unsigned long deadlineMs, bool pump, String& outStatus,
+                       bool& chunked, int& contentLength);
+void boardMemTotals(uint32_t& memFree, uint32_t& memTotal);
+void pumpGateway();
 
 // ====== DISPLAY UTILS ======
 
@@ -548,9 +552,8 @@ void drawDashboard() {
 
   updateLocalTime();
   String t = timeClient.getFormattedTime();
-  String gwHeader = gatewayConnected ? "GW:Good" : "GW:Bad";
   u8g2.drawStr(0, 7, "MiniMe");
-  u8g2.drawStr(42, 7, gwHeader.c_str());
+  u8g2.drawStr(42, 7, gatewayConnected ? "GW:Good" : "GW:Bad");
   int timeX = 128 - u8g2.getStrWidth(t.c_str());
   if (timeX < 0) timeX = 0;
   u8g2.drawStr(timeX, 7, t.c_str());
@@ -593,8 +596,8 @@ void drawDashboard() {
   u8g2.drawStr(0, 23, upTempBuf);
 
   long rssi = WiFi.RSSI();
-  uint32_t freeHeap = ESP.getFreeHeap();
-  uint32_t totalHeap = ESP.getHeapSize();
+  uint32_t memFree = 0, memTotal = 0;
+  boardMemTotals(memFree, memTotal);
 
   int sigBarW = 0;
   if (rssi >= -40) sigBarW = 79;
@@ -604,12 +607,6 @@ void drawDashboard() {
   u8g2.drawFrame(25, 24, 103, 8);
   if (sigBarW > 0) u8g2.drawBox(26, 25, sigBarW, 6);
 
-  uint32_t psramSize = ESP.getPsramSize();
-  uint32_t psramFree = ESP.getFreePsram();
-  if (psramSize < BOARD_PSRAM_BYTES) psramSize = BOARD_PSRAM_BYTES;
-  if (psramFree < 1) psramFree = BOARD_PSRAM_BYTES;
-  uint32_t memTotal = totalHeap + psramSize;
-  uint32_t memFree  = freeHeap + psramFree;
   int heapBarW = 0;
   if (memTotal > 0) {
     heapBarW = (int)((memFree * 79UL) / memTotal);
@@ -658,8 +655,8 @@ void drawDashboard() {
     }
     u8g2.drawStr(0, y, name.c_str());
 
-    String statusWord = String(statusToWord(trackedUsers[row].active ? trackedUsers[row].status : 0));
-    u8g2.drawStr(statusX, y, statusWord.c_str());
+    u8g2.drawStr(statusX, y,
+                 statusToWord(trackedUsers[row].active ? trackedUsers[row].status : 0));
 
     uint32_t uses = trackedUsers[row].active ? trackedUsers[row].useCount24h : 0;
     String botStr = "Bot:" + String(uses);
@@ -761,14 +758,19 @@ bool readTemperature(float &tempC, float &tempF) {
 }
 // ====== DISCORD REST ======
 
+void boardMemTotals(uint32_t& memFree, uint32_t& memTotal) {
+  uint32_t psramSize = ESP.getPsramSize();
+  uint32_t psramFree = ESP.getFreePsram();
+  if (psramSize < BOARD_PSRAM_BYTES) psramSize = BOARD_PSRAM_BYTES;
+  if (ESP.getPsramSize() == 0 || psramFree < 1) psramFree = BOARD_PSRAM_BYTES;
+  memTotal = ESP.getHeapSize() + psramSize;
+  memFree = ESP.getFreeHeap() + psramFree;
+}
+
 String getSystemInfo() {
   long rssi = WiFi.RSSI();
-  uint32_t psramSize = ESP.getPsramSize();
-  if (psramSize < BOARD_PSRAM_BYTES) psramSize = BOARD_PSRAM_BYTES;
-  uint32_t psramFree = ESP.getFreePsram();
-  if (ESP.getPsramSize() == 0) psramFree = BOARD_PSRAM_BYTES;
-  uint32_t freeHeap = ESP.getFreeHeap() + psramFree;
-  uint32_t totalHeap = ESP.getHeapSize() + psramSize;
+  uint32_t freeHeap = 0, totalHeap = 0;
+  boardMemTotals(freeHeap, totalHeap);
   unsigned long uptimeSec = millis() / 1000;
   unsigned long days = uptimeSec / 86400;
   unsigned long hours = (uptimeSec % 86400) / 3600;
@@ -789,9 +791,7 @@ bool sendDiscordMessage(const String& channelId, const String& content, bool sup
   String post = content;
   if (post.length() > DISCORD_CONTENT_MAX) post = post.substring(0, DISCORD_CONTENT_MAX - 3) + "...";
   httpsInUse = true;
-  httpsClient.stop();
-  httpsClient.setInsecure();
-  if (!httpsClient.connect("discord.com", 443)) {
+  if (!httpsConnect("discord.com")) {
     httpsInUse = false;
     return false;
   }
@@ -931,28 +931,14 @@ bool isOwner(const String& authorId) {
 // ====== PUBLIC HTTP APIs (Discord commands) ======
 bool getWeather(const String& zip, String& outReport) {
   WiFiClient client;
-  if (!client.connect("api.openweathermap.org", 80)) {
+  String url = "/data/2.5/weather?zip=" + zip + ",US&units=imperial&appid=" + WEATHER_API_KEY;
+  if (!httpGetOpen(client, "api.openweathermap.org", url, 5000)) {
     outReport = "Weather service connection failed.";
     return false;
   }
-  String url = "/data/2.5/weather?zip=" + zip + ",US&units=imperial&appid=" + WEATHER_API_KEY;
-  client.print(String("GET ") + url + " HTTP/1.1\r\n" +
-               "Host: api.openweathermap.org\r\n" +
-               "Connection: close\r\n\r\n");
-  unsigned long timeout = millis();
-  while (client.available() == 0) {
-    if (millis() - timeout > 5000) {
-      outReport = "Weather service timeout.";
-      client.stop();
-      return false;
-    }
-  }
-  while (client.available()) {
-    String line = client.readStringUntil('\n');
-    if (line == "\r") break;
-  }
   StaticJsonDocument<2048> doc;
   DeserializationError err = deserializeJson(doc, client);
+  client.stop();
   if (err) {
     outReport = "Weather JSON parse error.";
     return false;
@@ -983,6 +969,70 @@ bool skipHttpHeaders(Client& client, unsigned long timeoutMs) {
   return true;
 }
 
+bool httpsConnect(const char* host, uint32_t timeoutMs) {
+  httpsClient.stop();
+  httpsClient.setInsecure();
+  httpsClient.setTimeout(timeoutMs);
+  return httpsClient.connect(host, 443);
+}
+
+bool httpsGetOpen(const char* host, const String& path, unsigned long headerTimeoutMs,
+                  const char* userAgent, const char* extraHeaders) {
+  if (!httpsConnect(host)) return false;
+  String req = String("GET ") + path + " HTTP/1.1\r\n"
+               "Host: " + host + "\r\n"
+               "User-Agent: " + userAgent + "\r\n";
+  if (extraHeaders && extraHeaders[0]) req += extraHeaders;
+  req += "Connection: close\r\n\r\n";
+  httpsClient.print(req);
+  if (!skipHttpHeaders(httpsClient, headerTimeoutMs)) {
+    httpsClient.stop();
+    return false;
+  }
+  return true;
+}
+
+bool httpGetOpen(WiFiClient& client, const char* host, const String& path, unsigned long headerTimeoutMs) {
+  if (!client.connect(host, 80)) return false;
+  client.print(String("GET ") + path + " HTTP/1.1\r\n"
+               "Host: " + host + "\r\n"
+               "Connection: close\r\n\r\n");
+  if (!skipHttpHeaders(client, headerTimeoutMs)) {
+    client.stop();
+    return false;
+  }
+  return true;
+}
+
+bool httpsAwaitHeaders(unsigned long deadlineMs, bool pump, String& outStatus,
+                       bool& chunked, int& contentLength) {
+  while (httpsClient.available() == 0) {
+    if (millis() > deadlineMs) {
+      httpsClient.stop();
+      return false;
+    }
+    if (pump) pumpGateway();
+    delay(10);
+  }
+  outStatus = httpsClient.readStringUntil('\n');
+  outStatus.trim();
+  chunked = false;
+  contentLength = -1;
+  while (millis() <= deadlineMs) {
+    String line = httpsClient.readStringUntil('\n');
+    if (line == "\r" || line.length() == 0) break;
+    String lower = line;
+    lower.toLowerCase();
+    if (lower.startsWith("transfer-encoding:") && lower.indexOf("chunked") >= 0) {
+      chunked = true;
+    }
+    if (lower.startsWith("content-length:")) {
+      contentLength = lower.substring(lower.indexOf(':') + 1).toInt();
+    }
+  }
+  return true;
+}
+
 bool discordIdLooksValid(const String& id) {
   if (id.length() < 16) return false;
   for (unsigned int i = 0; i < id.length(); i++) {
@@ -994,10 +1044,7 @@ bool discordIdLooksValid(const String& id) {
 
 bool discordRestGet(const String& path, String& outBody, String& outStatus) {
   outBody = "";
-  httpsClient.stop();
-  httpsClient.setInsecure();
-  httpsClient.setTimeout(15000);
-  if (!httpsClient.connect("discord.com", 443)) {
+  if (!httpsConnect("discord.com", 15000)) {
     outStatus = "connect failed";
     return false;
   }
@@ -1012,29 +1059,11 @@ bool discordRestGet(const String& path, String& outBody, String& outStatus) {
   httpsClient.print(request);
 
   unsigned long deadline = millis() + 15000UL;
-  while (httpsClient.available() == 0) {
-    if (millis() > deadline) {
-      httpsClient.stop();
-      outStatus = "timeout";
-      return false;
-    }
-    delay(10);
-  }
-  outStatus = httpsClient.readStringUntil('\n');
-  outStatus.trim();
   bool chunked = false;
   int contentLength = -1;
-  while (millis() <= deadline) {
-    String line = httpsClient.readStringUntil('\n');
-    if (line == "\r" || line.length() == 0) break;
-    String lower = line;
-    lower.toLowerCase();
-    if (lower.startsWith("transfer-encoding:") && lower.indexOf("chunked") >= 0) {
-      chunked = true;
-    }
-    if (lower.startsWith("content-length:")) {
-      contentLength = lower.substring(lower.indexOf(':') + 1).toInt();
-    }
+  if (!httpsAwaitHeaders(deadline, false, outStatus, chunked, contentLength)) {
+    outStatus = "timeout";
+    return false;
   }
   bool ok = readHttpBodyAfterHeaders(httpsClient, chunked, contentLength, outBody, deadline);
   httpsClient.stop();
@@ -1121,15 +1150,10 @@ bool appendMembersFromGuild(const String& guildId, uint8_t maxToAdd) {
     if (member["user"]["bot"] == true) continue;
     String uid = member["user"]["id"] | "";
     String name = member["nick"] | "";
-    if (name.length() == 0) name = member["user"]["global_name"] | "";
-    if (name.length() == 0) name = member["user"]["username"] | "";
+    if (name.length() == 0) name = discordDisplayName(member["user"]);
     if (uid.length() == 0 || name.length() == 0) continue;
     if (findUserIndex(uid) >= 0) continue;
-    trackedUsers[slot].active = true;
-    trackedUsers[slot].userId = uid;
-    trackedUsers[slot].userName = name;
-    trackedUsers[slot].status = 0;
-    trackedUsers[slot].useCount24h = 0;
+    fillTrackedSlot(slot, uid, name);
     added++;
   }
 
@@ -1141,7 +1165,7 @@ bool fetchGuildMembersAtStartup() {
   cachedGuildCount = 0;
   rememberGuildId(String(BOT_GUILD_ID));
   rememberGuildId(guildIdFromChannel(TARGET_CHANNEL_ID));
-  rememberGuildId(guildIdFromChannel(String(TARGET_CHANNEL_ID1)));
+  rememberGuildId(guildIdFromChannel(TARGET_CHANNEL_ID1));
 
   if (cachedGuildCount == 0) {
     return false;
@@ -1176,20 +1200,8 @@ String truncateText(const String& s, int maxLen) {
 }
 
 bool getScienceNews(String& outReport) {
-  httpsClient.stop();
-  httpsClient.setInsecure();
-  if (!httpsClient.connect("api.spaceflightnewsapi.net", 443)) {
+  if (!httpsGetOpen("api.spaceflightnewsapi.net", "/v4/articles/?limit=3", 8000)) {
     outReport = "Science news connection failed.";
-    return false;
-  }
-  httpsClient.print(
-    "GET /v4/articles/?limit=3 HTTP/1.1\r\n"
-    "Host: api.spaceflightnewsapi.net\r\n"
-    "User-Agent: MiniMeBot/1.0\r\n"
-    "Connection: close\r\n\r\n");
-  if (!skipHttpHeaders(httpsClient, 8000)) {
-    outReport = "Science news timeout.";
-    httpsClient.stop();
     return false;
   }
   StaticJsonDocument<192> filter;
@@ -1223,21 +1235,11 @@ bool getScienceNews(String& outReport) {
   return n > 0;
 }
 bool getPhysicsPapers(String& outReport) {
-  httpsClient.stop();
-  httpsClient.setInsecure();
-  if (!httpsClient.connect("export.arxiv.org", 443)) {
+  const char* path =
+    "/api/query?search_query=cat:physics.*&start=0&max_results=3&sortBy=submittedDate&sortOrder=descending";
+  if (!httpsGetOpen("export.arxiv.org", path, 8000,
+                    "MiniMeBot/1.0 (ESP32 Discord bot)", "Accept-Encoding: identity\r\n")) {
     outReport = "arXiv connection failed.";
-    return false;
-  }
-  httpsClient.print(
-    "GET /api/query?search_query=cat:physics.*&start=0&max_results=3&sortBy=submittedDate&sortOrder=descending HTTP/1.1\r\n"
-    "Host: export.arxiv.org\r\n"
-    "User-Agent: MiniMeBot/1.0 (ESP32 Discord bot)\r\n"
-    "Accept-Encoding: identity\r\n"
-    "Connection: close\r\n\r\n");
-  if (!skipHttpHeaders(httpsClient, 8000)) {
-    outReport = "arXiv timeout.";
-    httpsClient.stop();
     return false;
   }
   String xml;
@@ -1289,20 +1291,9 @@ bool getPhysicsPapers(String& outReport) {
   return true;
 }
 bool getApod(String& outReport) {
-  httpsClient.stop();
-  httpsClient.setInsecure();
-  if (!httpsClient.connect("api.nasa.gov", 443)) {
-    outReport = "NASA APOD connection failed.";
-    return false;
-  }
   String path = String("/planetary/apod?api_key=") + NASA_API_KEY;
-  httpsClient.print(String("GET ") + path + " HTTP/1.1\r\n" +
-                    "Host: api.nasa.gov\r\n" +
-                    "User-Agent: MiniMeBot/1.0\r\n" +
-                    "Connection: close\r\n\r\n");
-  if (!skipHttpHeaders(httpsClient, 8000)) {
-    outReport = "NASA APOD timeout.";
-    httpsClient.stop();
+  if (!httpsGetOpen("api.nasa.gov", path, 8000)) {
+    outReport = "NASA APOD connection failed.";
     return false;
   }
   StaticJsonDocument<128> filter;
@@ -1329,17 +1320,8 @@ bool getApod(String& outReport) {
 }
 bool getIssPosition(String& outReport) {
   WiFiClient client;
-  if (!client.connect("api.open-notify.org", 80)) {
+  if (!httpGetOpen(client, "api.open-notify.org", "/iss-now.json", 5000)) {
     outReport = "ISS tracker connection failed.";
-    return false;
-  }
-  client.print(
-    "GET /iss-now.json HTTP/1.1\r\n"
-    "Host: api.open-notify.org\r\n"
-    "Connection: close\r\n\r\n");
-  if (!skipHttpHeaders(client, 5000)) {
-    outReport = "ISS tracker timeout.";
-    client.stop();
     return false;
   }
   StaticJsonDocument<512> doc;
@@ -1447,10 +1429,7 @@ bool askDeepSeek(const String& question, String& outReport) {
   user["content"] = q;
   String body;
   serializeJson(req, body);
-  httpsClient.stop();
-  httpsClient.setInsecure();
-  httpsClient.setTimeout(25000);
-  if (!httpsClient.connect("api.deepseek.com", 443)) {
+  if (!httpsConnect("api.deepseek.com", 25000)) {
     outReport = "DeepSeek connection failed.";
     return false;
   }
@@ -1467,30 +1446,12 @@ bool askDeepSeek(const String& question, String& outReport) {
     body;
   httpsClient.print(request);
   unsigned long deadline = millis() + 45000UL;
-  while (httpsClient.available() == 0) {
-    pumpGateway();
-    if (millis() > deadline) {
-      outReport = "DeepSeek timeout waiting for headers.";
-      httpsClient.stop();
-      return false;
-    }
-    delay(10);
-  }
-  String statusLine = httpsClient.readStringUntil('\n');
-  statusLine.trim();
+  String statusLine;
   bool chunked = false;
   int contentLength = -1;
-  while (millis() <= deadline) {
-    String line = httpsClient.readStringUntil('\n');
-    if (line == "\r" || line.length() == 0) break;
-    String lower = line;
-    lower.toLowerCase();
-    if (lower.startsWith("transfer-encoding:") && lower.indexOf("chunked") >= 0) {
-      chunked = true;
-    }
-    if (lower.startsWith("content-length:")) {
-      contentLength = lower.substring(lower.indexOf(':') + 1).toInt();
-    }
+  if (!httpsAwaitHeaders(deadline, true, statusLine, chunked, contentLength)) {
+    outReport = "DeepSeek timeout waiting for headers.";
+    return false;
   }
   String respBody;
   if (!readHttpBodyAfterHeaders(httpsClient, chunked, contentLength, respBody, deadline)) {
@@ -1581,6 +1542,22 @@ void runAskFromLoop() {
 }
 
 // ====== DISCORD COMMAND DISPATCH ======
+typedef bool (*FetchReportFn)(String&);
+
+void sendFetchResult(const String& channelId, const char* label, bool ok, const String& report,
+                     const String& okLine2 = "Sent", const String& okLine3 = "") {
+  sendDiscordMessage(channelId, report);
+  if (ok) showTransient(label, okLine2, okLine3);
+  else showTransient(label, "Error");
+}
+
+void runFetchCommand(const String& channelId, const char* label, const char* fetching,
+                     FetchReportFn fetch) {
+  String report;
+  showTransient(label, fetching);
+  sendFetchResult(channelId, label, fetch(report), report);
+}
+
 void handleCommand(const String& content, const String& authorId, const String& authorName,
                    const String& channelId, bool isDM)
 {
@@ -1674,61 +1651,24 @@ void handleCommand(const String& content, const String& authorId, const String& 
     }
     String report;
     showTransient("Weather", "Fetching " + zip + "...");
-    if (getWeather(zip, report)) {
-      sendDiscordMessage(channelId, report);
-      showTransient("Weather", zip, "Sent");
-    } else {
-      sendDiscordMessage(channelId, report);
-      showTransient("Weather", "Error");
-    }
+    bool ok = getWeather(zip, report);
+    sendFetchResult(channelId, "Weather", ok, report, zip, "Sent");
     return;
   }
   if (cmdWord == "!news") {
-    String report;
-    showTransient("News", "Fetching...");
-    if (getScienceNews(report)) {
-      sendDiscordMessage(channelId, report);
-      showTransient("News", "Sent");
-    } else {
-      sendDiscordMessage(channelId, report);
-      showTransient("News", "Error");
-    }
+    runFetchCommand(channelId, "News", "Fetching...", getScienceNews);
     return;
   }
   if (cmdWord == "!physics") {
-    String report;
-    showTransient("Physics", "Fetching arXiv...");
-    if (getPhysicsPapers(report)) {
-      sendDiscordMessage(channelId, report);
-      showTransient("Physics", "Sent");
-    } else {
-      sendDiscordMessage(channelId, report);
-      showTransient("Physics", "Error");
-    }
+    runFetchCommand(channelId, "Physics", "Fetching arXiv...", getPhysicsPapers);
     return;
   }
   if (cmdWord == "!apod") {
-    String report;
-    showTransient("APOD", "Fetching NASA...");
-    if (getApod(report)) {
-      sendDiscordMessage(channelId, report);
-      showTransient("APOD", "Sent");
-    } else {
-      sendDiscordMessage(channelId, report);
-      showTransient("APOD", "Error");
-    }
+    runFetchCommand(channelId, "APOD", "Fetching NASA...", getApod);
     return;
   }
   if (cmdWord == "!iss") {
-    String report;
-    showTransient("ISS", "Fetching...");
-    if (getIssPosition(report)) {
-      sendDiscordMessage(channelId, report);
-      showTransient("ISS", "Sent");
-    } else {
-      sendDiscordMessage(channelId, report);
-      showTransient("ISS", "Error");
-    }
+    runFetchCommand(channelId, "ISS", "Fetching...", getIssPosition);
     return;
   }
   if (cmdWord == "!temp") {
@@ -1942,10 +1882,7 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
           String content   = d["content"].as<String>();
           String channelId = d["channel_id"].as<String>();
           String authorId  = d["author"]["id"].as<String>();
-          String authorName = d["author"]["global_name"].as<String>();
-          if (authorName.length() == 0) {
-            authorName = d["author"]["username"].as<String>();
-          }
+          String authorName = discordDisplayName(d["author"]);
           bool isDM = d["guild_id"].isNull();
           handleCommand(content, authorId, authorName, channelId, isDM);
         }

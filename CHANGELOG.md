@@ -1,6 +1,12 @@
 # Changelog
 
-Older sections describe that release as shipped. Current firmware and docs are **0.4.26** (see `VERSION` and README).
+Older sections describe that release as shipped. Current firmware and docs are **0.4.27** (see `VERSION` and README).
+
+## 0.4.27
+
+- Firmware cleanup: strip dead Serial debug and unused helpers; trim sketch comment noise (command list lives in Discord `!help`).
+- Shared HTTPS/HTTP open helpers, fetch-command helpers, `discordDisplayName`, and tracked-user slot clear/fill.
+- Owner/channel IDs as `const char*`; shared `boardMemTotals()` for OLED heap bar and `!sysinfo`.
 
 ## 0.4.26
 

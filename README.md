@@ -286,7 +286,7 @@ USB port voltage moves the raw touch numbers. MiniMe reads VBUS through a **divi
 - At boot, **`setupTouch()`** runs **after Wi-Fi and I2C**. It samples USB VBUS, then fills a **16-sample rolling average** of voltage-compensated idle touch readings (`touchIdleAvg`).
 - Trip is always **`touchIdleAvg + TOUCH_THRESHOLD`** (default gap **2000**). Idle samples below trip keep updating the rolling window; a tap does not.
 - **`loop()`** calls **`pollTouchWake()`** (no touch interrupt). A rising edge, after a **300 ms** debounce, uses the same wake path as a Discord event (full contrast, 1-minute idle timer restarted).
-- Serial touch debug is **off** (commented out in the sketch).
+- Serial logging / touch debug is **removed** from the sketch (not just commented out).
 
 ### Tuning sensitivity
 
@@ -318,7 +318,7 @@ After changing the threshold, re-upload and tap the pad: the OLED should wake on
    - NTPClient
 5. Open `MiniMe_Discord_Bot/MiniMe_Discord_Bot.ino`.
 6. Fill in Wi‑Fi, token, keys, and IDs.
-7. Upload. Serial logging in the sketch is commented out; use Discord `!help` and the OLED to confirm it is running.
+7. Upload. The sketch has no Serial logging; use Discord `!help` and the OLED to confirm it is running.
 8. In Discord, try `!help`. Tap the GPIO 4 pad to wake the OLED after it dims off.
 
 Do not enable `heap_caps_malloc_extmem_enable` for small allocations. Wi‑Fi / TLS in PSRAM can crash this board. Gateway JSON (`256KB`) is allocated in PSRAM on purpose.
