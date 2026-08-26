@@ -19,7 +19,11 @@ const char* BOT_TOKEN     = "bot token";
 const char* WEATHER_API_KEY = "WEATHER_API_KEY";
 const char* NASA_API_KEY    = "NASA_API_KEY";
 const char* DEEPSEEK_API_KEY = "DEEPSEEK_API_KEY";
-#define BOT_GUILD_ID "GUILD_ID"  const char* OWNER_ID_STR        = "OWNER_ID_STR";  const char* TARGET_CHANNEL_ID  = "TARGET_CHANNEL_ID";  const char* TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";  const int DISCORD_CONTENT_MAX = 2000;
+#define BOT_GUILD_ID "GUILD_ID"
+const char* OWNER_ID_STR        = "OWNER_ID_STR";
+const char* TARGET_CHANNEL_ID  = "TARGET_CHANNEL_ID";
+const char* TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";
+const int DISCORD_CONTENT_MAX = 2000;
 const int DEEPSEEK_MAX_TOKENS = 900;
 const size_t DEEPSEEK_JSON_DOC = 12288;
 const int RGB_LED_PIN = 48;
@@ -29,11 +33,19 @@ const int PIN_SET2    = 7;
 const int PIN_DS18B20 = 10;
 const int PIN_I2C_SDA = 8;
 const int PIN_I2C_SCL = 9;
-const int PIN_TOUCH   = 4; const uint32_t TOUCH_THRESHOLD = 2000; const int PIN_USB_VBUS_ADC = 1;
-const uint32_t USB_VBUS_R_HI = 10000; const uint32_t USB_VBUS_R_LO = 10000; const uint8_t TOUCH_AVG_N = 16;       const unsigned long USB_VBUS_READ_MS = 500;
+const int PIN_TOUCH   = 4;
+const uint32_t TOUCH_THRESHOLD = 2000;
+const int PIN_USB_VBUS_ADC = 1;
+const uint32_t USB_VBUS_R_HI = 10000;
+const uint32_t USB_VBUS_R_LO = 10000;
+const uint8_t TOUCH_AVG_N = 16;
+const unsigned long USB_VBUS_READ_MS = 500;
 WiFiUDP ntpUDP;
-const long PST_OFFSET_SEC = -28800; const long PDT_OFFSET_SEC = -25200; NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
-int civilDayOfWeek(int year, int month, int day) {   static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+const long PST_OFFSET_SEC = -28800;
+const long PDT_OFFSET_SEC = -25200;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
+int civilDayOfWeek(int year, int month, int day) {
+  static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
   int y = year;
   if (month < 3) y--;
   return (y + y / 4 - y / 100 + y / 400 + t[month - 1] + day) % 7;
@@ -54,11 +66,13 @@ bool isPacificDaylightTime(unsigned long utcEpoch) {
   if (month < 3 || month > 11) return false;
   if (month > 3 && month < 11) return true;
   if (month == 3) {
-    int startDay = nthSundayOfMonth(year, 3, 2);     if (day < startDay) return false;
+    int startDay = nthSundayOfMonth(year, 3, 2);
+    if (day < startDay) return false;
     if (day > startDay) return true;
     return hour >= 10;
   }
-  int endDay = nthSundayOfMonth(year, 11, 1);   if (day < endDay) return true;
+  int endDay = nthSundayOfMonth(year, 11, 1);
+  if (day < endDay) return true;
   if (day > endDay) return false;
   return hour < 9;
 }
@@ -68,18 +82,23 @@ void updateLocalTime() {
   unsigned long utc = timeClient.getEpochTime();
   timeClient.setTimeOffset(isPacificDaylightTime(utc) ? PDT_OFFSET_SEC : PST_OFFSET_SEC);
 }
-const unsigned long SYSINFO_INTERVAL_MS = 14400000UL; unsigned long lastSysInfoMillis = 0;
+const unsigned long SYSINFO_INTERVAL_MS = 14400000UL;
+unsigned long lastSysInfoMillis = 0;
 int lastSentHour = -1;
 WebSocketsClient gatewayWS;
 WiFiClientSecure httpsClient;
 DynamicJsonDocument* gwDoc = nullptr;
-const size_t GW_DOC_PSRAM = 262144;   const uint32_t BOARD_PSRAM_BYTES = 8UL * 1024UL * 1024UL; bool gatewayConnected     = false;
+const size_t GW_DOC_PSRAM = 262144;
+const uint32_t BOARD_PSRAM_BYTES = 8UL * 1024UL * 1024UL;
+bool gatewayConnected     = false;
 bool identified           = false;
 int  heartbeatIntervalMs   = 0;
 unsigned long lastHeartbeatMillis = 0;
 int lastSeq               = 0;
 unsigned long lastBotActivityMillis = 0;
-const unsigned long BOT_PRESENCE_IDLE_MS = 300000UL; uint8_t botDiscordStatus = 0; const uint32_t CPU_MHZ_ACTIVE = 240;
+const unsigned long BOT_PRESENCE_IDLE_MS = 300000UL;
+uint8_t botDiscordStatus = 0;
+const uint32_t CPU_MHZ_ACTIVE = 240;
 const uint32_t CPU_MHZ_OLED_OFF_BOT_IDLE = 80;
 void noteBotActivity();
 void updateBotPresenceIdle();
@@ -92,7 +111,8 @@ float dashTempF = -999.0f;
 int lastServoDeg = 45;
 struct TrackedUser {
   String userId, userName;
-  uint8_t status;    uint32_t useCount24h;
+  uint8_t status;
+  uint32_t useCount24h;
   bool active;
 };
 static const uint8_t MAX_TRACKED_USERS = 8;
@@ -106,7 +126,8 @@ uint8_t statusFromDiscord(const char* s) {
   if (!strcmp(s, "online")) return 2;
   if (!strcmp(s, "idle")) return 1;
   if (!strcmp(s, "dnd")) return 3;
-  return 0;  }
+  return 0;
+}
 const char* statusToWord(uint8_t s) {
   static const char* w[] = {"Off", "Idle", "On", "DND"};
   return s < 4 ? w[s] : "Off";
@@ -165,7 +186,7 @@ int addOrPickUserSlot(const String& userId, const String& userName) {
     fillTrackedSlot((uint8_t)idx, userId, userName);
     return idx;
   }
-    uint8_t worst = 0;
+  uint8_t worst = 0;
   for (uint8_t i = 1; i < MAX_TRACKED_USERS; i++) {
     if (trackedUsers[i].useCount24h < trackedUsers[worst].useCount24h) worst = i;
   }
@@ -181,7 +202,8 @@ void recordUserUse(const String& userId, const String& userName) {
   }
   if (idx < 0) return;
   if (userName.length()) trackedUsers[idx].userName = userName;
-  trackedUsers[idx].status = 2;    trackedUsers[idx].useCount24h++;
+  trackedUsers[idx].status = 2;
+  trackedUsers[idx].useCount24h++;
   noteDisplayActivity();
 }
 void applyPresencesArray(JsonArray presences) {
@@ -264,7 +286,9 @@ uint32_t usbVbusMvCached = 0;
 uint32_t usbVbusCompLastMv = 0;
 unsigned long usbVbusLastReadMs = 0;
 bool displayAsleep = false;
-const unsigned long DISPLAY_IDLE_MS = 60000UL; const unsigned long DISPLAY_DIM_MS = 15000UL; const unsigned long TOUCH_DEBOUNCE_MS = 300;
+const unsigned long DISPLAY_IDLE_MS = 60000UL;
+const unsigned long DISPLAY_DIM_MS = 15000UL;
+const unsigned long TOUCH_DEBOUNCE_MS = 300;
 const uint8_t DISPLAY_CONTRAST_FULL = 255;
 OneWire oneWire(PIN_DS18B20);
 DallasTemperature sensors(&oneWire);
@@ -276,7 +300,8 @@ bool discordIdLooksValid(const String& id);
 bool httpsConnect(const char* host, uint32_t timeoutMs = 15000);
 uint8_t httpsGetOpen(const char* host, const String& path, unsigned long headerTimeoutMs,
                      const char* userAgent = "MiniMeBot/1.0",
-                     const char* extraHeaders = nullptr); uint8_t httpGetOpen(WiFiClient& client, const char* host, const String& path, unsigned long headerTimeoutMs);
+                     const char* extraHeaders = nullptr);
+uint8_t httpGetOpen(WiFiClient& client, const char* host, const String& path, unsigned long headerTimeoutMs);
 bool httpsAwaitHeaders(unsigned long deadlineMs, bool pump, String& outStatus,
                        bool& chunked, int& contentLength);
 void setHttpOpenError(String& outReport, uint8_t err, const char* label);
@@ -374,7 +399,8 @@ void updateTouchIdleAvg(uint32_t compensated) {
 }
 void configureTouchHardware() {
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
-  touchSetTiming(0.5f, 100); #else
+  touchSetTiming(0.5f, 100);
+#else
   touchSetCycles(1, 100);
 #endif
 }
@@ -420,7 +446,8 @@ void updateDisplaySleep() {
     return;
   }
   displayAsleep = true;
-  u8g2.setPowerSave(1); }
+  u8g2.setPowerSave(1);
+}
 void showTransient(const String& line1, const String& line2 = "", const String& line3 = "", unsigned long durationMs = 3000) {
   noteDisplayActivity();
   transientLine1 = line1;
@@ -459,7 +486,7 @@ void drawDashboard() {
     snprintf(dateBuf, sizeof(dateBuf), "%s %s %2d %04d",
              DOW_NAME[tmLocal.tm_wday], MON_NAME[tmLocal.tm_mon],
              tmLocal.tm_mday, tmLocal.tm_year + 1900);
-        const char* dateSlot = "Www Mmm 99 9999";
+    const char* dateSlot = "Www Mmm 99 9999";
     int dateX = 128 - u8g2.getStrWidth(dateSlot);
     if (dateX < 0) dateX = 0;
     u8g2.drawStr(dateX, 15, dateBuf);
@@ -649,7 +676,8 @@ String getSystemInfo() {
          "• **USB VBUS:** " + String((float)readUsbVbusMilliVolts() / 1000.0f, 3) + " V\n"
          "• **Firmware:** https://github.com/dogma2u/A-discord-bot-on-ESP32";
 }
-bool httpsInUse = false; bool sendDiscordMessage(const String& channelId, const String& content, bool suppressEmbeds = false) {
+bool httpsInUse = false;
+bool sendDiscordMessage(const String& channelId, const String& content, bool suppressEmbeds = false) {
   if (httpsInUse) return false;
   String post = content;
   if (post.length() > DISCORD_CONTENT_MAX) post = post.substring(0, DISCORD_CONTENT_MAX - 3) + "...";
@@ -662,7 +690,8 @@ bool httpsInUse = false; bool sendDiscordMessage(const String& channelId, const 
   StaticJsonDocument<4096> doc;
   doc["content"] = post;
   doc["tts"] = false;
-  if (suppressEmbeds) doc["flags"] = 4;   if (post.length() > 0 && doc["content"].isNull()) {
+  if (suppressEmbeds) doc["flags"] = 4;
+  if (post.length() > 0 && doc["content"].isNull()) {
     httpsClient.stop();
     httpsInUse = false;
     return false;
@@ -739,7 +768,8 @@ void sendIdentify() {
   props["device"]  = "esp32";
   d["compress"]         = false;
   d["large_threshold"] = 250;
-  d["intents"] = 37635;   JsonObject presence = d.createNestedObject("presence");
+  d["intents"] = 37635;
+  JsonObject presence = d.createNestedObject("presence");
   presence["since"] = nullptr;
   presence.createNestedArray("activities");
   presence["status"] = "online";
@@ -1373,7 +1403,8 @@ void runAskFromLoop() {
   askNeedPost = false;
   String channelId = askPendingChannelId;
   String report;
-  httpsInUse = true;   bool ok = askDeepSeek(askPendingQuestion, report);
+  httpsInUse = true;
+  bool ok = askDeepSeek(askPendingQuestion, report);
   httpsInUse = false;
   askPendingQuestion = "";
   askPendingChannelId = "";
@@ -1437,7 +1468,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
   String args = (spIdx > 0) ? raw.substring(spIdx + 1) : "";
   cmdWord.toLowerCase();
   args.trim();
-    if (midLine && args.length() > 0 &&
+  if (midLine && args.length() > 0 &&
       cmdWord != "!ask" && cmdWord != "!display" && cmdWord != "!led") {
     int argSp = args.indexOf(' ');
     if (argSp > 0) args = args.substring(0, argSp);
@@ -1724,7 +1755,8 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
           return;
         }
         if (strcmp(t, "MESSAGE_CREATE") == 0) {
-          if (httpsInUse) return;           JsonObject d = (*gwDoc)["d"];
+          if (httpsInUse) return;
+          JsonObject d = (*gwDoc)["d"];
           if (d["author"]["bot"] == true) return;
           String content   = d["content"].as<String>();
           String channelId = d["channel_id"].as<String>();
@@ -1743,7 +1775,7 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
 void backgroundTasks() {
   runAskFromLoop();
   unsigned long now = millis();
-    if (gatewayConnected && identified &&
+  if (gatewayConnected && identified &&
       (lastSysInfoMillis == 0 || now - lastSysInfoMillis >= SYSINFO_INTERVAL_MS)) {
     lastSysInfoMillis = now;
     noteBotActivity();
@@ -1810,7 +1842,8 @@ void setup() {
   connectGateway();
   setServoAngle(45);
   lastDashMillis = 0;
-  setupTouch();   showTransient("Ready", "Idle presence");
+  setupTouch();
+  showTransient("Ready", "Idle presence");
   drawDashboard();
 }
 void loop() {
