@@ -1,6 +1,13 @@
 # Changelog
 
-Older sections describe that release as shipped. Current firmware and docs are **0.4.27** (see `VERSION` and README).
+Older sections describe that release as shipped. Current firmware and docs are **0.4.28** (see `VERSION` and README).
+
+## 0.4.28
+
+- Owner `!led`: keep `on` / `off`; add `!led <r> <g> <b>` (integers **0–255**) on the onboard RGB NeoPixel (GPIO 48, `NEO_GRB`). `on` is white 255 255 255. Helpers: `setLedRgb`, `parseRgbTriplet`.
+- Mid-line `!led` keeps multi-word RGB args (same as `!ask` / `!display`). Discord `!help` / README use `!led on/off` wording.
+- Firmware polish: `gwSendJson`, `drawDashBar`, `findFreeTrackedSlot`, `uptimeDhms`, HTTP open connect/timeout codes, dashboard user rows without `String names[]`, `sendDiscordMessage` via `httpsAwaitHeaders`, drop `botDiscordStatusSent` (status `0` = unset).
+- CHANGELOG 0.4.13 mid-line note corrected for `!led`.
 
 ## 0.4.27
 
@@ -64,7 +71,7 @@ Older sections describe that release as shipped. Current firmware and docs are *
 
 ## 0.4.13
 
-- Mid-sentence one-word args work (`This is a test !led on of …` is `!led on`). `!ask` / `!display` still take the rest of the line.
+- Mid-sentence one-word args work for most commands (e.g. `… !weather 90210 …`). `!ask` / `!display` / `!led` keep multi-word args for the rest of the line.
 
 ## 0.4.12
 

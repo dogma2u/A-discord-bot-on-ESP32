@@ -27,7 +27,7 @@
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <time.h>
-#include <esp_heap_caps.h>
+#include <string.h>
 #include <esp_idf_version.h>
 // ====== USER CONFIG ======
 // Local-only secrets. GitHub sketch keeps placeholders. Do not commit real values.
@@ -132,8 +132,7 @@ int lastSeq               = 0;
 // Bot's own Discord status (Gateway OP 3). Not the 8-user OLED rows.
 unsigned long lastBotActivityMillis = 0;
 const unsigned long BOT_PRESENCE_IDLE_MS = 300000UL; // 5 minutes quiet -> Idle
-uint8_t botDiscordStatus = 2; // 1=idle, 2=online
-bool botDiscordStatusSent = false;
+uint8_t botDiscordStatus = 0; // 0=unset (re-send after disconnect), 1=idle, 2=online
 const uint32_t CPU_MHZ_ACTIVE = 240;
 const uint32_t CPU_MHZ_OLED_OFF_BOT_IDLE = 80;
 void noteBotActivity();
@@ -218,6 +217,13 @@ int findUserIndex(const String& userId) {
   return -1;
 }
 
+int findFreeTrackedSlot() {
+  for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
+    if (!trackedUsers[i].active) return (int)i;
+  }
+  return -1;
+}
+
 int addOrPickUserSlot(const String& userId, const String& userName) {
   int idx = findUserIndex(userId);
   if (idx >= 0) {
@@ -225,11 +231,10 @@ int addOrPickUserSlot(const String& userId, const String& userName) {
     return idx;
   }
 
-  for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
-    if (!trackedUsers[i].active) {
-      fillTrackedSlot(i, userId, userName);
-      return (int)i;
-    }
+  idx = findFreeTrackedSlot();
+  if (idx >= 0) {
+    fillTrackedSlot((uint8_t)idx, userId, userName);
+    return idx;
   }
 
   // Full: overwrite lowest 24h-use slot.
@@ -267,6 +272,12 @@ void applyPresencesArray(JsonArray presences) {
   }
 }
 
+void gwSendJson(JsonDocument& doc) {
+  String payload;
+  serializeJson(doc, payload);
+  gatewayWS.sendTXT(payload);
+}
+
 void requestTrackedUserPresences() {
   if (cachedGuildCount == 0) return;
   bool any = false;
@@ -292,9 +303,7 @@ void requestTrackedUserPresences() {
         ids.add(trackedUsers[i].userId);
       }
     }
-    String payload;
-    serializeJson(doc, payload);
-    gatewayWS.sendTXT(payload);
+    gwSendJson(doc);
   }
 }
 
@@ -360,13 +369,15 @@ bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
                               String& outBody, unsigned long deadlineMs);
 bool discordIdLooksValid(const String& id);
 bool httpsConnect(const char* host, uint32_t timeoutMs = 15000);
-bool httpsGetOpen(const char* host, const String& path, unsigned long headerTimeoutMs,
-                  const char* userAgent = "MiniMeBot/1.0",
-                  const char* extraHeaders = nullptr);
-bool httpGetOpen(WiFiClient& client, const char* host, const String& path, unsigned long headerTimeoutMs);
+uint8_t httpsGetOpen(const char* host, const String& path, unsigned long headerTimeoutMs,
+                     const char* userAgent = "MiniMeBot/1.0",
+                     const char* extraHeaders = nullptr); // 0 ok, 1 connect, 2 timeout
+uint8_t httpGetOpen(WiFiClient& client, const char* host, const String& path, unsigned long headerTimeoutMs);
 bool httpsAwaitHeaders(unsigned long deadlineMs, bool pump, String& outStatus,
                        bool& chunked, int& contentLength);
+void setHttpOpenError(String& outReport, uint8_t err, const char* label);
 void boardMemTotals(uint32_t& memFree, uint32_t& memTotal);
+void uptimeDhms(unsigned long& days, unsigned long& hours, unsigned long& minutes);
 void pumpGateway();
 
 // ====== DISPLAY UTILS ======
@@ -543,6 +554,13 @@ void showTransient(const String& line1, const String& line2 = "", const String& 
   lastDashMillis = 0;
 }
 
+// Frame at (25, baselineY-7) size 103x8; fill at (26, baselineY-6).
+void drawDashBar(const char* label, uint8_t baselineY, int fillW) {
+  u8g2.drawStr(0, baselineY, label);
+  u8g2.drawFrame(25, baselineY - 7, 103, 8);
+  if (fillW > 0) u8g2.drawBox(26, baselineY - 6, fillW, 6);
+}
+
 // 5x7 → 6px/char, 8px/row. drawStr y = baseline.
 // y=7 header | 15 bot+date | 23 up/temp | 31 sig | 39 heap | 47 srv
 // y=55..111 users | 119/127 transient
@@ -581,11 +599,8 @@ void drawDashboard() {
     u8g2.drawStr(dateX, 15, dateBuf);
   }
 
-  unsigned long uptimeSec = millis() / 1000;
-  unsigned long d = uptimeSec / 86400;
-  unsigned long h = (uptimeSec % 86400) / 3600;
-  unsigned long m = (uptimeSec % 3600) / 60;
-  if (d > 9999) d = 9999;
+  unsigned long d = 0, h = 0, m = 0;
+  uptimeDhms(d, h, m);
   char upTempBuf[32];
   if (dashTempC > -998.0f) {
     snprintf(upTempBuf, sizeof(upTempBuf), "Up:%4lud%2luh%2lum T:%3.0fF/%3.0fC",
@@ -603,9 +618,7 @@ void drawDashboard() {
   if (rssi >= -40) sigBarW = 79;
   else if (rssi <= -100) sigBarW = 0;
   else sigBarW = (int)((rssi + 100) * 79 / 60);
-  u8g2.drawStr(0, 31, "Sig:");
-  u8g2.drawFrame(25, 24, 103, 8);
-  if (sigBarW > 0) u8g2.drawBox(26, 25, sigBarW, 6);
+  drawDashBar("Sig:", 31, sigBarW);
 
   int heapBarW = 0;
   if (memTotal > 0) {
@@ -613,17 +626,13 @@ void drawDashboard() {
     if (heapBarW < 0) heapBarW = 0;
     if (heapBarW > 79) heapBarW = 79;
   }
-  u8g2.drawStr(0, 39, "Heap:");
-  u8g2.drawFrame(25, 32, 103, 8);
-  if (heapBarW > 0) u8g2.drawBox(26, 33, heapBarW, 6);
+  drawDashBar("Heap:", 39, heapBarW);
 
   const int srvInnerW = 101;
   int srvBarW = (lastServoDeg * srvInnerW) / 90;
   if (srvBarW < 0) srvBarW = 0;
   if (srvBarW > srvInnerW) srvBarW = srvInnerW;
-  u8g2.drawStr(0, 47, "Srv:");
-  u8g2.drawFrame(25, 40, 103, 8);
-  if (srvBarW > 0) u8g2.drawBox(26, 41, srvBarW, 6);
+  drawDashBar("Srv:", 47, srvBarW);
 
   const int gapPx = 4;
   const int statusW = u8g2.getStrWidth("Idle");
@@ -631,17 +640,17 @@ void drawDashboard() {
   int nameMaxPx = 128 - gapPx - statusW - gapPx - botReserveW;
   if (nameMaxPx < 16) nameMaxPx = 16;
 
-  String names[MAX_TRACKED_USERS];
+  const char* nameSrc[MAX_TRACKED_USERS];
   int longestNamePx = 0;
   for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
     if (!trackedUsers[i].active) {
-      names[i] = "---";
+      nameSrc[i] = "---";
     } else if (trackedUsers[i].userName.length()) {
-      names[i] = trackedUsers[i].userName;
+      nameSrc[i] = trackedUsers[i].userName.c_str();
     } else {
-      names[i] = trackedUsers[i].userId;
+      nameSrc[i] = trackedUsers[i].userId.c_str();
     }
-    int w = u8g2.getStrWidth(names[i].c_str());
+    int w = u8g2.getStrWidth(nameSrc[i]);
     if (w > longestNamePx) longestNamePx = w;
   }
   if (longestNamePx > nameMaxPx) longestNamePx = nameMaxPx;
@@ -649,20 +658,23 @@ void drawDashboard() {
 
   for (uint8_t row = 0; row < MAX_TRACKED_USERS; row++) {
     uint8_t y = 55 + (row * 8);
-    String name = names[row];
-    while (name.length() > 1 && u8g2.getStrWidth(name.c_str()) > longestNamePx) {
-      name.remove(name.length() - 1);
+    char name[40];
+    strncpy(name, nameSrc[row], sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
+    while (strlen(name) > 1 && u8g2.getStrWidth(name) > longestNamePx) {
+      name[strlen(name) - 1] = '\0';
     }
-    u8g2.drawStr(0, y, name.c_str());
+    u8g2.drawStr(0, y, name);
 
     u8g2.drawStr(statusX, y,
                  statusToWord(trackedUsers[row].active ? trackedUsers[row].status : 0));
 
     uint32_t uses = trackedUsers[row].active ? trackedUsers[row].useCount24h : 0;
-    String botStr = "Bot:" + String(uses);
-    int botX = 128 - u8g2.getStrWidth(botStr.c_str());
+    char botBuf[12];
+    snprintf(botBuf, sizeof(botBuf), "Bot:%lu", (unsigned long)uses);
+    int botX = 128 - u8g2.getStrWidth(botBuf);
     if (botX < statusX + statusW + 2) botX = statusX + statusW + 2;
-    u8g2.drawStr(botX, y, botStr.c_str());
+    u8g2.drawStr(botX, y, botBuf);
   }
 
   String row15 = "";
@@ -767,14 +779,20 @@ void boardMemTotals(uint32_t& memFree, uint32_t& memTotal) {
   memFree = ESP.getFreeHeap() + psramFree;
 }
 
+void uptimeDhms(unsigned long& days, unsigned long& hours, unsigned long& minutes) {
+  unsigned long sec = millis() / 1000;
+  days = sec / 86400;
+  hours = (sec % 86400) / 3600;
+  minutes = (sec % 3600) / 60;
+  if (days > 9999) days = 9999;
+}
+
 String getSystemInfo() {
   long rssi = WiFi.RSSI();
   uint32_t freeHeap = 0, totalHeap = 0;
   boardMemTotals(freeHeap, totalHeap);
-  unsigned long uptimeSec = millis() / 1000;
-  unsigned long days = uptimeSec / 86400;
-  unsigned long hours = (uptimeSec % 86400) / 3600;
-  unsigned long minutes = (uptimeSec % 3600) / 60;
+  unsigned long days = 0, hours = 0, minutes = 0;
+  uptimeDhms(days, hours, minutes);
   String uptimeStr = String(days) + "d " + String(hours) + "h " + String(minutes) + "m";
   return "📊 **System Diagnostics:**\n"
          "• **Uptime:** " + uptimeStr + "\n"
@@ -817,18 +835,16 @@ bool sendDiscordMessage(const String& channelId, const String& content, bool sup
     "Connection: close\r\n\r\n" +
     body;
   httpsClient.print(request);
-  unsigned long start = millis();
+  unsigned long deadline = millis() + 5000UL;
   String statusLine;
-  while (httpsClient.connected() && millis() - start < 5000) {
-    if (httpsClient.available()) {
-      String line = httpsClient.readStringUntil('\n');
-      if (statusLine.length() == 0) statusLine = line;
-      if (line == "\r" || line.length() == 0) break;
-    }
+  bool chunked = false;
+  int contentLength = -1;
+  if (!httpsAwaitHeaders(deadline, false, statusLine, chunked, contentLength)) {
+    httpsInUse = false;
+    return false;
   }
   httpsClient.stop();
   httpsInUse = false;
-  statusLine.trim();
   int code = 0;
   int sp = statusLine.indexOf(' ');
   if (sp >= 0) code = statusLine.substring(sp + 1).toInt();
@@ -843,17 +859,14 @@ void sendBotPresence(const char* status, bool afk) {
   d.createNestedArray("activities");
   d["status"] = status;
   d["afk"] = afk;
-  String payload;
-  serializeJson(doc, payload);
-  gatewayWS.sendTXT(payload);
+  gwSendJson(doc);
 }
 
 void noteBotActivity() {
   lastBotActivityMillis = millis();
   if (!gatewayConnected || !identified) return;
-  if (botDiscordStatus == 2 && botDiscordStatusSent) return;
+  if (botDiscordStatus == 2) return;
   botDiscordStatus = 2;
-  botDiscordStatusSent = true;
   sendBotPresence("online", false);
 }
 
@@ -866,7 +879,6 @@ void updateBotPresenceIdle() {
   if (botDiscordStatus == 1) return;
   if (millis() - lastBotActivityMillis < BOT_PRESENCE_IDLE_MS) return;
   botDiscordStatus = 1;
-  botDiscordStatusSent = true;
   sendBotPresence("idle", true);
 }
 
@@ -895,12 +907,9 @@ void sendIdentify() {
   presence.createNestedArray("activities");
   presence["status"] = "online";
   presence["afk"] = false;
-  String payload;
-  serializeJson(doc, payload);
-  gatewayWS.sendTXT(payload);
+  gwSendJson(doc);
   lastBotActivityMillis = millis();
   botDiscordStatus = 2;
-  botDiscordStatusSent = true;
 }
 
 void sendHeartbeat() {
@@ -911,9 +920,7 @@ void sendHeartbeat() {
   } else {
     doc["d"] = lastSeq;
   }
-  String payload;
-  serializeJson(doc, payload);
-  gatewayWS.sendTXT(payload);
+  gwSendJson(doc);
 }
 void pumpGateway() {
   gatewayWS.loop();
@@ -925,6 +932,40 @@ void pumpGateway() {
     }
   }
 }
+bool isLedByteToken(const String& s) {
+  if (s.length() == 0 || s.length() > 3) return false;
+  for (unsigned i = 0; i < s.length(); i++) {
+    char c = s.charAt(i);
+    if (c < '0' || c > '9') return false;
+  }
+  int v = s.toInt();
+  return v >= 0 && v <= 255;
+}
+
+void setLedRgb(uint8_t r, uint8_t g, uint8_t b) {
+  pixels.setPixelColor(0, pixels.Color(r, g, b));
+  pixels.show();
+}
+
+bool parseRgbTriplet(const String& args, uint8_t& r, uint8_t& g, uint8_t& b) {
+  String a = args;
+  a.trim();
+  int sp1 = a.indexOf(' ');
+  int sp2 = (sp1 >= 0) ? a.indexOf(' ', sp1 + 1) : -1;
+  if (sp1 <= 0 || sp2 <= sp1) return false;
+  String rs = a.substring(0, sp1);
+  String gs = a.substring(sp1 + 1, sp2);
+  String bs = a.substring(sp2 + 1);
+  bs.trim();
+  int sp3 = bs.indexOf(' ');
+  if (sp3 >= 0) bs = bs.substring(0, sp3);
+  if (!isLedByteToken(rs) || !isLedByteToken(gs) || !isLedByteToken(bs)) return false;
+  r = (uint8_t)rs.toInt();
+  g = (uint8_t)gs.toInt();
+  b = (uint8_t)bs.toInt();
+  return true;
+}
+
 bool isOwner(const String& authorId) {
   return authorId == OWNER_ID_STR;
 }
@@ -932,8 +973,9 @@ bool isOwner(const String& authorId) {
 bool getWeather(const String& zip, String& outReport) {
   WiFiClient client;
   String url = "/data/2.5/weather?zip=" + zip + ",US&units=imperial&appid=" + WEATHER_API_KEY;
-  if (!httpGetOpen(client, "api.openweathermap.org", url, 5000)) {
-    outReport = "Weather service connection failed.";
+  uint8_t openErr = httpGetOpen(client, "api.openweathermap.org", url, 5000);
+  if (openErr) {
+    setHttpOpenError(outReport, openErr, "Weather service");
     return false;
   }
   StaticJsonDocument<2048> doc;
@@ -976,9 +1018,10 @@ bool httpsConnect(const char* host, uint32_t timeoutMs) {
   return httpsClient.connect(host, 443);
 }
 
-bool httpsGetOpen(const char* host, const String& path, unsigned long headerTimeoutMs,
-                  const char* userAgent, const char* extraHeaders) {
-  if (!httpsConnect(host)) return false;
+// Returns 0=ok, 1=connect failed, 2=header timeout.
+uint8_t httpsGetOpen(const char* host, const String& path, unsigned long headerTimeoutMs,
+                     const char* userAgent, const char* extraHeaders) {
+  if (!httpsConnect(host)) return 1;
   String req = String("GET ") + path + " HTTP/1.1\r\n"
                "Host: " + host + "\r\n"
                "User-Agent: " + userAgent + "\r\n";
@@ -987,21 +1030,26 @@ bool httpsGetOpen(const char* host, const String& path, unsigned long headerTime
   httpsClient.print(req);
   if (!skipHttpHeaders(httpsClient, headerTimeoutMs)) {
     httpsClient.stop();
-    return false;
+    return 2;
   }
-  return true;
+  return 0;
 }
 
-bool httpGetOpen(WiFiClient& client, const char* host, const String& path, unsigned long headerTimeoutMs) {
-  if (!client.connect(host, 80)) return false;
+uint8_t httpGetOpen(WiFiClient& client, const char* host, const String& path, unsigned long headerTimeoutMs) {
+  if (!client.connect(host, 80)) return 1;
   client.print(String("GET ") + path + " HTTP/1.1\r\n"
                "Host: " + host + "\r\n"
                "Connection: close\r\n\r\n");
   if (!skipHttpHeaders(client, headerTimeoutMs)) {
     client.stop();
-    return false;
+    return 2;
   }
-  return true;
+  return 0;
+}
+
+void setHttpOpenError(String& outReport, uint8_t err, const char* label) {
+  outReport = String(label);
+  outReport += (err == 2) ? " timeout." : " connection failed.";
 }
 
 bool httpsAwaitHeaders(unsigned long deadlineMs, bool pump, String& outStatus,
@@ -1142,18 +1190,15 @@ bool appendMembersFromGuild(const String& guildId, uint8_t maxToAdd) {
   uint8_t added = 0;
   for (JsonObject member : members) {
     if (added >= maxToAdd) break;
-    uint8_t slot = 255;
-    for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
-      if (!trackedUsers[i].active) { slot = i; break; }
-    }
-    if (slot == 255) break;
+    int slot = findFreeTrackedSlot();
+    if (slot < 0) break;
     if (member["user"]["bot"] == true) continue;
     String uid = member["user"]["id"] | "";
     String name = member["nick"] | "";
     if (name.length() == 0) name = discordDisplayName(member["user"]);
     if (uid.length() == 0 || name.length() == 0) continue;
     if (findUserIndex(uid) >= 0) continue;
-    fillTrackedSlot(slot, uid, name);
+    fillTrackedSlot((uint8_t)slot, uid, name);
     added++;
   }
 
@@ -1200,8 +1245,9 @@ String truncateText(const String& s, int maxLen) {
 }
 
 bool getScienceNews(String& outReport) {
-  if (!httpsGetOpen("api.spaceflightnewsapi.net", "/v4/articles/?limit=3", 8000)) {
-    outReport = "Science news connection failed.";
+  uint8_t openErr = httpsGetOpen("api.spaceflightnewsapi.net", "/v4/articles/?limit=3", 8000);
+  if (openErr) {
+    setHttpOpenError(outReport, openErr, "Science news");
     return false;
   }
   StaticJsonDocument<192> filter;
@@ -1237,9 +1283,10 @@ bool getScienceNews(String& outReport) {
 bool getPhysicsPapers(String& outReport) {
   const char* path =
     "/api/query?search_query=cat:physics.*&start=0&max_results=3&sortBy=submittedDate&sortOrder=descending";
-  if (!httpsGetOpen("export.arxiv.org", path, 8000,
-                    "MiniMeBot/1.0 (ESP32 Discord bot)", "Accept-Encoding: identity\r\n")) {
-    outReport = "arXiv connection failed.";
+  uint8_t openErr = httpsGetOpen("export.arxiv.org", path, 8000,
+                                 "MiniMeBot/1.0 (ESP32 Discord bot)", "Accept-Encoding: identity\r\n");
+  if (openErr) {
+    setHttpOpenError(outReport, openErr, "arXiv");
     return false;
   }
   String xml;
@@ -1292,8 +1339,9 @@ bool getPhysicsPapers(String& outReport) {
 }
 bool getApod(String& outReport) {
   String path = String("/planetary/apod?api_key=") + NASA_API_KEY;
-  if (!httpsGetOpen("api.nasa.gov", path, 8000)) {
-    outReport = "NASA APOD connection failed.";
+  uint8_t openErr = httpsGetOpen("api.nasa.gov", path, 8000);
+  if (openErr) {
+    setHttpOpenError(outReport, openErr, "NASA APOD");
     return false;
   }
   StaticJsonDocument<128> filter;
@@ -1320,8 +1368,9 @@ bool getApod(String& outReport) {
 }
 bool getIssPosition(String& outReport) {
   WiFiClient client;
-  if (!httpGetOpen(client, "api.open-notify.org", "/iss-now.json", 5000)) {
-    outReport = "ISS tracker connection failed.";
+  uint8_t openErr = httpGetOpen(client, "api.open-notify.org", "/iss-now.json", 5000);
+  if (openErr) {
+    setHttpOpenError(outReport, openErr, "ISS tracker");
     return false;
   }
   StaticJsonDocument<512> doc;
@@ -1591,9 +1640,9 @@ void handleCommand(const String& content, const String& authorId, const String& 
   String args = (spIdx > 0) ? raw.substring(spIdx + 1) : "";
   cmdWord.toLowerCase();
   args.trim();
-  // Mid-line bang: one-word args only (!led on, !weather zip). !ask / !display keep rest of line.
+  // Mid-line bang: one-word args for most cmds. !ask / !display / !led keep multi-word args.
   if (midLine && args.length() > 0 &&
-      cmdWord != "!ask" && cmdWord != "!display") {
+      cmdWord != "!ask" && cmdWord != "!display" && cmdWord != "!led") {
     int argSp = args.indexOf(' ');
     if (argSp > 0) args = args.substring(0, argSp);
     while (args.length() > 0) {
@@ -1624,7 +1673,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
       "• `!time` — Displays the current bot time.\n"
       "• `!weather <zip>` — Fetches the weather report for a US ZIP code.\n\n"
       "**👑 Owner-Only Commands:**\n"
-      "• `!led on` / `!led off` — Controls the RGB NeoPixel LED.\n"
+      "• `!led on/off` / `!led <r> <g> <b>` — RGB NeoPixel (0–255 per channel).\n"
       "• `!servo <0-90>` — Moves the servo motor to a specific angle.\n"
       "• `!set1 on` / `!set1 off` — Controls digital output pin 1.\n"
       "• `!set2 on` / `!set2 off` — Controls digital output pin 2.";
@@ -1741,19 +1790,27 @@ void handleCommand(const String& content, const String& authorId, const String& 
     }
     if (cmdWord == "!led") {
       String a = args;
-      a.toLowerCase();
-      if (a == "on") {
-        pixels.setPixelColor(0, pixels.Color(255, 255, 255));
-        pixels.show();
-        sendDiscordMessage(channelId, "LED ON");
+      a.trim();
+      String al = a;
+      al.toLowerCase();
+      if (al == "on") {
+        setLedRgb(255, 255, 255);
+        sendDiscordMessage(channelId, "LED ON (255 255 255)");
         showTransient("LED", "ON");
-      } else if (a == "off") {
-        pixels.setPixelColor(0, pixels.Color(0, 0, 0));
-        pixels.show();
+      } else if (al == "off") {
+        setLedRgb(0, 0, 0);
         sendDiscordMessage(channelId, "LED OFF");
         showTransient("LED", "OFF");
       } else {
-        sendDiscordMessage(channelId, "Usage: !led on/off");
+        uint8_t r, g, b;
+        if (!parseRgbTriplet(a, r, g, b)) {
+          sendDiscordMessage(channelId, "Usage: !led on/off  or  !led <r> <g> <b> (0-255)");
+          return;
+        }
+        setLedRgb(r, g, b);
+        String msg = "LED RGB " + String(r) + " " + String(g) + " " + String(b);
+        sendDiscordMessage(channelId, msg);
+        showTransient("LED", String(r) + "," + String(g) + "," + String(b));
       }
       return;
     }
@@ -1800,7 +1857,7 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
     case WStype_DISCONNECTED:
       gatewayConnected = false;
       identified       = false;
-      botDiscordStatusSent = false;
+      botDiscordStatus = 0;
       showTransient("Gateway", "Disconnected");
       break;
     case WStype_CONNECTED:
@@ -1975,7 +2032,6 @@ void setup() {
 
 void loop() {
   pumpGateway();
-  applyCpuForIdleState();
   backgroundTasks();
   pollTouchWake();
   updateBotPresenceIdle();

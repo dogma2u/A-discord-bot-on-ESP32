@@ -30,7 +30,7 @@ Same list Discord shows for `!help`:
 
 **Owner-only** (`OWNER_ID_STR`):
 
-- `!led on` / `!led off` — onboard RGB NeoPixel
+- `!led on/off` / `!led <r> <g> <b>` — RGB NeoPixel (0–255 per channel); GPIO 48; `on` = 255 255 255
 - `!servo <0-90>` — servo angle (updates the `Srv:` bar)
 - `!set1 on` / `!set1 off` — digital output pin 1
 - `!set2 on` / `!set2 off` — digital output pin 2
@@ -232,7 +232,7 @@ Display: **SSD1327**, **128×128** pixels, I2C.
 
 | Device | GPIO |
 |---|---|
-| RGB NeoPixel | 48 |
+| RGB NeoPixel (1×, GRB; `!led`) | 48 |
 | Servo | 47 |
 | Digital out 1 (`!set1`) | 6 |
 | Digital out 2 (`!set2`) | 7 |
@@ -243,6 +243,13 @@ Display: **SSD1327**, **128×128** pixels, I2C.
 | USB VBUS ADC (divider) | 1 |
 
 OLED module labels: **GND, VCC, SCL, SDA**. The panel is **128×128**. Change pins in the sketch if your wiring differs.
+
+### RGB NeoPixel (GPIO 48)
+
+One WS2812-style pixel (`NEO_GRB`). Owner-only:
+
+- `!led on/off` — white (255, 255, 255) / off (0, 0, 0)
+- `!led <r> <g> <b>` — set red, green, blue each **0–255** (example: `!led 255 0 0` red)
 
 ### DS18B20 (GPIO 10)
 
