@@ -1,19 +1,3 @@
-/*
- MiniMe Discord bot (ESP32-S3 + SSD1327). Command list: Discord !help.
-
- Sketch map (top to bottom):
- 1) Config, pins, NTP / Pacific DST
- 2) Gateway state + 8-user presence / 24h command counts
- 3) OLED dashboard, sleep, overlays (U8g2 drawStr; y = font baseline)
- 4) GPIO, servo, DS18B20, NeoPixel
- 5) Discord REST, public HTTP APIs, command handler
- 6) Touch wake (GPIO 4) + USB VBUS ADC (GPIO 1 divider)
- 7) Gateway websocket, bot Online/Idle, scheduled posts, setup / loop
-
- OLED sleep dims then blanks the panel only; ESP32 and Wi-Fi stay up.
- Touch is polled in loop() (no interrupt). Bot status: online on activity,
- idle after 5 min quiet; touch does not set Online.
-*/
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WebSocketsClient.h>
@@ -29,61 +13,36 @@
 #include <time.h>
 #include <string.h>
 #include <esp_idf_version.h>
-// ====== USER CONFIG ======
-// Local-only secrets. GitHub sketch keeps placeholders. Do not commit real values.
 const char* WIFI_SSID     = "ssid";
 const char* WIFI_PASSWORD = "password";
 const char* BOT_TOKEN     = "bot token";
 const char* WEATHER_API_KEY = "WEATHER_API_KEY";
 const char* NASA_API_KEY    = "NASA_API_KEY";
 const char* DEEPSEEK_API_KEY = "DEEPSEEK_API_KEY";
-#define BOT_GUILD_ID "GUILD_ID"  // startup member fetch
-// ====== OWNER AND CHANNEL IDS ======
-const char* OWNER_ID_STR        = "OWNER_ID_STR";  // GPIO / servo
-const char* TARGET_CHANNEL_ID  = "TARGET_CHANNEL_ID";  // commands + auto posts
-const char* TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";  // second command channel
-// Discord content max is 2000. !ask max_tokens / JSON buffer sized to fit one message.
-const int DISCORD_CONTENT_MAX = 2000;
+#define BOT_GUILD_ID "GUILD_ID"  const char* OWNER_ID_STR        = "OWNER_ID_STR";  const char* TARGET_CHANNEL_ID  = "TARGET_CHANNEL_ID";  const char* TARGET_CHANNEL_ID1 = "TARGET_CHANNEL_ID1";  const int DISCORD_CONTENT_MAX = 2000;
 const int DEEPSEEK_MAX_TOKENS = 900;
 const size_t DEEPSEEK_JSON_DOC = 12288;
-// ====== GPIO CONFIG ======
-// WeAct ESP32-S3-N16R8 defaults. Change here if wiring differs.
 const int RGB_LED_PIN = 48;
 const int PIN_SERVO   = 47;
 const int PIN_SET1    = 6;
 const int PIN_SET2    = 7;
 const int PIN_DS18B20 = 10;
-// I2C SSD1327 128x128 (GND / VCC / SCL / SDA on the module)
 const int PIN_I2C_SDA = 8;
 const int PIN_I2C_SCL = 9;
-const int PIN_TOUCH   = 4; // TOUCH4 — wire pad here
-const uint32_t TOUCH_THRESHOLD = 2000; // constant gap: trip = rolling idle avg + this
-// USB 5V (VBUS) → 10k → PIN_USB_VBUS_ADC → 10k → GND. Do not feed 5V straight into the pin.
-const int PIN_USB_VBUS_ADC = 1;
-const uint32_t USB_VBUS_R_HI = 10000; // ohms, 5V side
-const uint32_t USB_VBUS_R_LO = 10000; // ohms, GND side
-const uint8_t TOUCH_AVG_N = 16;       // rolling idle window
-const unsigned long USB_VBUS_READ_MS = 500;
-// ====== TIME CONFIG (NTP) — US Pacific DST ======
-// NTP is UTC; offset applied in updateLocalTime.
+const int PIN_TOUCH   = 4; const uint32_t TOUCH_THRESHOLD = 2000; const int PIN_USB_VBUS_ADC = 1;
+const uint32_t USB_VBUS_R_HI = 10000; const uint32_t USB_VBUS_R_LO = 10000; const uint8_t TOUCH_AVG_N = 16;       const unsigned long USB_VBUS_READ_MS = 500;
 WiFiUDP ntpUDP;
-const long PST_OFFSET_SEC = -28800; // UTC-8
-const long PDT_OFFSET_SEC = -25200; // UTC-7
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
-
-int civilDayOfWeek(int year, int month, int day) { // 0 = Sunday
-  static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+const long PST_OFFSET_SEC = -28800; const long PDT_OFFSET_SEC = -25200; NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
+int civilDayOfWeek(int year, int month, int day) {   static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
   int y = year;
   if (month < 3) y--;
   return (y + y / 4 - y / 100 + y / 400 + t[month - 1] + day) % 7;
 }
-
 int nthSundayOfMonth(int year, int month, int nth) {
   int dow1 = civilDayOfWeek(year, month, 1);
   int firstSunday = 1 + ((7 - dow1) % 7);
   return firstSunday + (nth - 1) * 7;
 }
-
 bool isPacificDaylightTime(unsigned long utcEpoch) {
   time_t t = (time_t)utcEpoch;
   struct tm tmUtc;
@@ -95,65 +54,45 @@ bool isPacificDaylightTime(unsigned long utcEpoch) {
   if (month < 3 || month > 11) return false;
   if (month > 3 && month < 11) return true;
   if (month == 3) {
-    int startDay = nthSundayOfMonth(year, 3, 2); // 2nd Sunday, 2:00am PST = 10:00 UTC
-    if (day < startDay) return false;
+    int startDay = nthSundayOfMonth(year, 3, 2);     if (day < startDay) return false;
     if (day > startDay) return true;
     return hour >= 10;
   }
-  int endDay = nthSundayOfMonth(year, 11, 1); // 1st Sunday, 2:00am PDT = 09:00 UTC
-  if (day < endDay) return true;
+  int endDay = nthSundayOfMonth(year, 11, 1);   if (day < endDay) return true;
   if (day > endDay) return false;
   return hour < 9;
 }
-
 void updateLocalTime() {
   timeClient.setTimeOffset(0);
   timeClient.update();
   unsigned long utc = timeClient.getEpochTime();
   timeClient.setTimeOffset(isPacificDaylightTime(utc) ? PDT_OFFSET_SEC : PST_OFFSET_SEC);
 }
-// ====== SCHEDULED & INTERVAL TASKS ======
-// 4-hour sysinfo and 06:00 / 12:00 / 18:00 Pacific indoor-temp posts go to TARGET_CHANNEL_ID.
-const unsigned long SYSINFO_INTERVAL_MS = 14400000UL; // 4 Hours
-unsigned long lastSysInfoMillis = 0;
+const unsigned long SYSINFO_INTERVAL_MS = 14400000UL; unsigned long lastSysInfoMillis = 0;
 int lastSentHour = -1;
-// ====== DISCORD GATEWAY ======
-// Websocket to gateway.discord.gg. gwDoc lives in PSRAM (256KB). Do not put small TLS buffers in PSRAM.
 WebSocketsClient gatewayWS;
 WiFiClientSecure httpsClient;
 DynamicJsonDocument* gwDoc = nullptr;
-const size_t GW_DOC_PSRAM = 262144;   // 256KB
-const uint32_t BOARD_PSRAM_BYTES = 8UL * 1024UL * 1024UL; // this ESP32-S3 board
-bool gatewayConnected     = false;
+const size_t GW_DOC_PSRAM = 262144;   const uint32_t BOARD_PSRAM_BYTES = 8UL * 1024UL * 1024UL; bool gatewayConnected     = false;
 bool identified           = false;
 int  heartbeatIntervalMs   = 0;
 unsigned long lastHeartbeatMillis = 0;
 int lastSeq               = 0;
-// Bot's own Discord status (Gateway OP 3). Not the 8-user OLED rows.
 unsigned long lastBotActivityMillis = 0;
-const unsigned long BOT_PRESENCE_IDLE_MS = 300000UL; // 5 minutes quiet -> Idle
-uint8_t botDiscordStatus = 0; // 0=unset (re-send after disconnect), 1=idle, 2=online
-const uint32_t CPU_MHZ_ACTIVE = 240;
+const unsigned long BOT_PRESENCE_IDLE_MS = 300000UL; uint8_t botDiscordStatus = 0; const uint32_t CPU_MHZ_ACTIVE = 240;
 const uint32_t CPU_MHZ_OLED_OFF_BOT_IDLE = 80;
 void noteBotActivity();
 void updateBotPresenceIdle();
 void sendBotPresence(const char* status, bool afk);
-// ====== DISPLAY STATE ======
-// EA_W128128 shifts the picture down: firmware y=0 is not glass top; y=119/127 can clip.
-U8G2_SSD1327_WS_128X128_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+U8G2_SSD1327_WS_128X128_F_HW_I2C u8g2(U8G2_R0,  U8X8_PIN_NONE);
 void noteDisplayActivity();
 void drawDashboard();
-
 float dashTempC = -999.0f;
 float dashTempF = -999.0f;
 int lastServoDeg = 45;
-
-// ====== USER TRACKING (8 dashboard rows) ======
-// REST member list at boot; Gateway presence + 24h command counts on OLED.
 struct TrackedUser {
   String userId, userName;
-  uint8_t status;  // 0 Off, 1 Idle, 2 On, 3 DND
-  uint32_t useCount24h;
+  uint8_t status;    uint32_t useCount24h;
   bool active;
 };
 static const uint8_t MAX_TRACKED_USERS = 8;
@@ -161,20 +100,17 @@ TrackedUser trackedUsers[MAX_TRACKED_USERS];
 String cachedGuildIds[3];
 uint8_t cachedGuildCount = 0;
 unsigned long usesWindowStartMillis = 0;
-const unsigned long USES_WINDOW_MS = 86400000UL;  // 24h
-
+const unsigned long USES_WINDOW_MS = 86400000UL;
 uint8_t statusFromDiscord(const char* s) {
   if (!s) return 0;
   if (!strcmp(s, "online")) return 2;
   if (!strcmp(s, "idle")) return 1;
   if (!strcmp(s, "dnd")) return 3;
-  return 0;  // offline / unknown
-}
+  return 0;  }
 const char* statusToWord(uint8_t s) {
   static const char* w[] = {"Off", "Idle", "On", "DND"};
   return s < 4 ? w[s] : "Off";
 }
-
 void clearTrackedSlot(uint8_t i) {
   trackedUsers[i].active = false;
   trackedUsers[i].userId = "";
@@ -182,7 +118,6 @@ void clearTrackedSlot(uint8_t i) {
   trackedUsers[i].status = 0;
   trackedUsers[i].useCount24h = 0;
 }
-
 void fillTrackedSlot(uint8_t i, const String& userId, const String& userName) {
   trackedUsers[i].active = true;
   trackedUsers[i].userId = userId;
@@ -190,11 +125,9 @@ void fillTrackedSlot(uint8_t i, const String& userId, const String& userName) {
   trackedUsers[i].status = 0;
   trackedUsers[i].useCount24h = 0;
 }
-
 void initTrackedUsers() {
   for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) clearTrackedSlot(i);
 }
-
 void resetUseWindowIfNeeded() {
   unsigned long now = millis();
   if (usesWindowStartMillis == 0) {
@@ -208,7 +141,6 @@ void resetUseWindowIfNeeded() {
     }
   }
 }
-
 int findUserIndex(const String& userId) {
   if (userId.length() == 0) return -1;
   for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
@@ -216,36 +148,30 @@ int findUserIndex(const String& userId) {
   }
   return -1;
 }
-
 int findFreeTrackedSlot() {
   for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
     if (!trackedUsers[i].active) return (int)i;
   }
   return -1;
 }
-
 int addOrPickUserSlot(const String& userId, const String& userName) {
   int idx = findUserIndex(userId);
   if (idx >= 0) {
     if (userName.length()) trackedUsers[idx].userName = userName;
     return idx;
   }
-
   idx = findFreeTrackedSlot();
   if (idx >= 0) {
     fillTrackedSlot((uint8_t)idx, userId, userName);
     return idx;
   }
-
-  // Full: overwrite lowest 24h-use slot.
-  uint8_t worst = 0;
+    uint8_t worst = 0;
   for (uint8_t i = 1; i < MAX_TRACKED_USERS; i++) {
     if (trackedUsers[i].useCount24h < trackedUsers[worst].useCount24h) worst = i;
   }
   fillTrackedSlot(worst, userId, userName);
   return (int)worst;
 }
-
 void recordUserUse(const String& userId, const String& userName) {
   resetUseWindowIfNeeded();
   if (userId.length() == 0) return;
@@ -255,11 +181,9 @@ void recordUserUse(const String& userId, const String& userName) {
   }
   if (idx < 0) return;
   if (userName.length()) trackedUsers[idx].userName = userName;
-  trackedUsers[idx].status = 2;  // command use => On on OLED
-  trackedUsers[idx].useCount24h++;
+  trackedUsers[idx].status = 2;    trackedUsers[idx].useCount24h++;
   noteDisplayActivity();
 }
-
 void applyPresencesArray(JsonArray presences) {
   if (presences.isNull()) return;
   for (JsonObject p : presences) {
@@ -271,13 +195,11 @@ void applyPresencesArray(JsonArray presences) {
     trackedUsers[idx].status = statusFromDiscord(st);
   }
 }
-
 void gwSendJson(JsonDocument& doc) {
   String payload;
   serializeJson(doc, payload);
   gatewayWS.sendTXT(payload);
 }
-
 void requestTrackedUserPresences() {
   if (cachedGuildCount == 0) return;
   bool any = false;
@@ -288,7 +210,6 @@ void requestTrackedUserPresences() {
     }
   }
   if (!any) return;
-
   for (uint8_t g = 0; g < cachedGuildCount; g++) {
     if (cachedGuildIds[g].length() < 16) continue;
     StaticJsonDocument<768> doc;
@@ -306,18 +227,15 @@ void requestTrackedUserPresences() {
     gwSendJson(doc);
   }
 }
-
 String discordDisplayName(JsonVariantConst user) {
   String name = user["global_name"] | "";
   if (name.length() == 0) name = user["username"] | "";
   return name;
 }
-
 void handlePresenceUpdate(JsonObject d) {
   const char* uid = d["user"]["id"];
   const char* st  = d["status"] | "offline";
   if (!uid) return;
-
   String name = discordDisplayName(d["user"]);
   int idx = findUserIndex(String(uid));
   if (idx < 0) {
@@ -327,19 +245,13 @@ void handlePresenceUpdate(JsonObject d) {
   if (name.length()) trackedUsers[idx].userName = name;
   trackedUsers[idx].status = statusFromDiscord(st);
 }
-
-// Transient text on OLED baselines y=119 / y=127 (!display / command status).
 String transientLine1 = "";
 String transientLine2 = "";
 String transientLine3 = "";
 unsigned long transientUntilMs = 0;
-
 unsigned long lastDashMillis = 0;
 const unsigned long DASH_REFRESH_MS = 2000;
 unsigned long lastDisplayActivityMillis = 0;
-
-// ====== TOUCH WAKE (GPIO 4) ======
-// Compensated raw vs rolling idle avg + TOUCH_THRESHOLD.
 unsigned long lastTouchWakeMillis = 0;
 bool touchWasActive = false;
 uint32_t touchIdleBuf[TOUCH_AVG_N];
@@ -352,18 +264,11 @@ uint32_t usbVbusMvCached = 0;
 uint32_t usbVbusCompLastMv = 0;
 unsigned long usbVbusLastReadMs = 0;
 bool displayAsleep = false;
-const unsigned long DISPLAY_IDLE_MS = 60000UL; // 1 minute full brightness
-const unsigned long DISPLAY_DIM_MS = 15000UL; // 15 seconds fade to off
-const unsigned long TOUCH_DEBOUNCE_MS = 300;
+const unsigned long DISPLAY_IDLE_MS = 60000UL; const unsigned long DISPLAY_DIM_MS = 15000UL; const unsigned long TOUCH_DEBOUNCE_MS = 300;
 const uint8_t DISPLAY_CONTRAST_FULL = 255;
-
-// ====== TEMP SENSOR (DS18B20 on PIN_DS18B20) ======
 OneWire oneWire(PIN_DS18B20);
 DallasTemperature sensors(&oneWire);
-// ====== NEOPIXEL (owner !led) ======
 Adafruit_NeoPixel pixels(1, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
-
-// ====== FORWARD DECLARATIONS ======
 bool readTemperature(float &tempC, float &tempF);
 bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
                               String& outBody, unsigned long deadlineMs);
@@ -371,17 +276,13 @@ bool discordIdLooksValid(const String& id);
 bool httpsConnect(const char* host, uint32_t timeoutMs = 15000);
 uint8_t httpsGetOpen(const char* host, const String& path, unsigned long headerTimeoutMs,
                      const char* userAgent = "MiniMeBot/1.0",
-                     const char* extraHeaders = nullptr); // 0 ok, 1 connect, 2 timeout
-uint8_t httpGetOpen(WiFiClient& client, const char* host, const String& path, unsigned long headerTimeoutMs);
+                     const char* extraHeaders = nullptr); uint8_t httpGetOpen(WiFiClient& client, const char* host, const String& path, unsigned long headerTimeoutMs);
 bool httpsAwaitHeaders(unsigned long deadlineMs, bool pump, String& outStatus,
                        bool& chunked, int& contentLength);
 void setHttpOpenError(String& outReport, uint8_t err, const char* label);
 void boardMemTotals(uint32_t& memFree, uint32_t& memTotal);
 void uptimeDhms(unsigned long& days, unsigned long& hours, unsigned long& minutes);
 void pumpGateway();
-
-// ====== DISPLAY UTILS ======
-
 void noteDisplayActivity() {
   lastDisplayActivityMillis = millis();
   if (displayAsleep) {
@@ -391,15 +292,12 @@ void noteDisplayActivity() {
   }
   u8g2.setContrast(DISPLAY_CONTRAST_FULL);
 }
-
 bool touchSampleValid(uint32_t raw) {
   return raw > 0 && raw < 150000;
 }
-
 uint32_t touchTripPoint() {
   return touchIdleAvg + TOUCH_THRESHOLD;
 }
-
 uint32_t readUsbVbusMilliVolts() {
   unsigned long now = millis();
   if (usbVbusLastReadMs != 0 && (now - usbVbusLastReadMs) < USB_VBUS_READ_MS) {
@@ -412,8 +310,6 @@ uint32_t readUsbVbusMilliVolts() {
   else usbVbusMvCached = (usbVbusMvCached * 7u + inst) / 8u;
   return usbVbusMvCached;
 }
-
-// Compensated idle samples are raw * ref / V. When V steps, rescale the window so trip stays put.
 void rescaleTouchIdleForVbus(uint32_t oldV, uint32_t newV) {
   if (oldV == 0 || newV == 0 || touchIdleBufCount == 0) return;
   touchIdleSum = 0;
@@ -423,8 +319,6 @@ void rescaleTouchIdleForVbus(uint32_t oldV, uint32_t newV) {
   }
   touchIdleAvg = touchIdleSum / touchIdleBufCount;
 }
-
-// Scale touch raw to boot-time USB voltage so VBUS sag/swell does not walk the gap.
 uint32_t compensateTouchRaw(uint32_t raw) {
   uint32_t v = readUsbVbusMilliVolts();
   if (usbVbusRefMv < 1000 || v < 1000) return raw;
@@ -434,7 +328,6 @@ uint32_t compensateTouchRaw(uint32_t raw) {
   usbVbusCompLastMv = v;
   return (uint32_t)((uint64_t)raw * usbVbusRefMv / v);
 }
-
 void setupUsbVbusAdc() {
   analogSetPinAttenuation(PIN_USB_VBUS_ADC, ADC_11db);
   pinMode(PIN_USB_VBUS_ADC, INPUT);
@@ -447,7 +340,6 @@ void setupUsbVbusAdc() {
   usbVbusRefMv = acc / 8;
   usbVbusCompLastMv = usbVbusMvCached;
 }
-
 void touchIdlePush(uint32_t sample) {
   if (touchIdleBufCount < TOUCH_AVG_N) {
     touchIdleBuf[touchIdleBufCount++] = sample;
@@ -460,7 +352,6 @@ void touchIdlePush(uint32_t sample) {
   }
   if (touchIdleBufCount > 0) touchIdleAvg = touchIdleSum / touchIdleBufCount;
 }
-
 void calibrateTouchIdleAvg() {
   touchIdleBufCount = 0;
   touchIdleBufIdx = 0;
@@ -476,27 +367,22 @@ void calibrateTouchIdleAvg() {
     touchIdlePush(compensateTouchRaw(raw));
   }
 }
-
 void updateTouchIdleAvg(uint32_t compensated) {
   if (!touchSampleValid(compensated)) return;
   if (compensated >= touchTripPoint()) return;
   touchIdlePush(compensated);
 }
-
 void configureTouchHardware() {
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
-  touchSetTiming(0.5f, 100); // Arduino ESP32 3.x / IDF 5.5+
-#else
+  touchSetTiming(0.5f, 100); #else
   touchSetCycles(1, 100);
 #endif
 }
-
 void setupTouch() {
   setupUsbVbusAdc();
   configureTouchHardware();
   calibrateTouchIdleAvg();
 }
-
 bool touchIsActive() {
   uint32_t raw = (uint32_t)touchRead(PIN_TOUCH);
   uint32_t compensated = compensateTouchRaw(raw);
@@ -504,8 +390,6 @@ bool touchIsActive() {
   updateTouchIdleAvg(compensated);
   return false;
 }
-
-// Rising edge only — stuck trip must not keep resetting the idle timer.
 void pollTouchWake() {
   bool active = touchIsActive();
   if (!active) {
@@ -519,8 +403,6 @@ void pollTouchWake() {
   lastTouchWakeMillis = now;
   noteDisplayActivity();
 }
-
-// Idle: full 1 min, dim 15 s, then blank. Clock/RSSI/heap ticks do not count as activity.
 void updateDisplaySleep() {
   if (displayAsleep) return;
   unsigned long now = millis();
@@ -528,10 +410,8 @@ void updateDisplaySleep() {
     lastDisplayActivityMillis = now;
     return;
   }
-
   unsigned long idle = now - lastDisplayActivityMillis;
   if (idle < DISPLAY_IDLE_MS) return;
-
   if (idle < DISPLAY_IDLE_MS + DISPLAY_DIM_MS) {
     unsigned long dimElapsed = idle - DISPLAY_IDLE_MS;
     uint8_t contrast = (uint8_t)(DISPLAY_CONTRAST_FULL -
@@ -539,12 +419,8 @@ void updateDisplaySleep() {
     u8g2.setContrast(contrast);
     return;
   }
-
   displayAsleep = true;
-  u8g2.setPowerSave(1); // panel off until touch or a real event
-}
-
-// Overlay on y=119/127; do not paint here (stack + NTP unsafe inside Gateway).
+  u8g2.setPowerSave(1); }
 void showTransient(const String& line1, const String& line2 = "", const String& line3 = "", unsigned long durationMs = 3000) {
   noteDisplayActivity();
   transientLine1 = line1;
@@ -553,21 +429,14 @@ void showTransient(const String& line1, const String& line2 = "", const String& 
   transientUntilMs = millis() + durationMs;
   lastDashMillis = 0;
 }
-
-// Frame at (25, baselineY-7) size 103x8; fill at (26, baselineY-6).
 void drawDashBar(const char* label, uint8_t baselineY, int fillW) {
   u8g2.drawStr(0, baselineY, label);
   u8g2.drawFrame(25, baselineY - 7, 103, 8);
   if (fillW > 0) u8g2.drawBox(26, baselineY - 6, fillW, 6);
 }
-
-// 5x7 → 6px/char, 8px/row. drawStr y = baseline.
-// y=7 header | 15 bot+date | 23 up/temp | 31 sig | 39 heap | 47 srv
-// y=55..111 users | 119/127 transient
 void drawDashboard() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_5x7_tf);
-
   updateLocalTime();
   String t = timeClient.getFormattedTime();
   u8g2.drawStr(0, 7, "MiniMe");
@@ -575,7 +444,6 @@ void drawDashboard() {
   int timeX = 128 - u8g2.getStrWidth(t.c_str());
   if (timeX < 0) timeX = 0;
   u8g2.drawStr(timeX, 7, t.c_str());
-
   {
     static const char* const DOW_NAME[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
     static const char* const MON_NAME[] = {"Jan","Feb","Mar","Apr","May","Jun",
@@ -587,18 +455,15 @@ void drawDashboard() {
     snprintf(botBuf, sizeof(botBuf), "Bot:%-6s",
              (botDiscordStatus == 2) ? "Online" : "Idle");
     u8g2.drawStr(0, 15, botBuf);
-
     char dateBuf[20];
     snprintf(dateBuf, sizeof(dateBuf), "%s %s %2d %04d",
              DOW_NAME[tmLocal.tm_wday], MON_NAME[tmLocal.tm_mon],
              tmLocal.tm_mday, tmLocal.tm_year + 1900);
-    // Fixed slot width so DOW column does not shift.
-    const char* dateSlot = "Www Mmm 99 9999";
+        const char* dateSlot = "Www Mmm 99 9999";
     int dateX = 128 - u8g2.getStrWidth(dateSlot);
     if (dateX < 0) dateX = 0;
     u8g2.drawStr(dateX, 15, dateBuf);
   }
-
   unsigned long d = 0, h = 0, m = 0;
   uptimeDhms(d, h, m);
   char upTempBuf[32];
@@ -609,17 +474,14 @@ void drawDashboard() {
     snprintf(upTempBuf, sizeof(upTempBuf), "Up:%4lud%2luh%2lum T:--Error--", d, h, m);
   }
   u8g2.drawStr(0, 23, upTempBuf);
-
   long rssi = WiFi.RSSI();
   uint32_t memFree = 0, memTotal = 0;
   boardMemTotals(memFree, memTotal);
-
   int sigBarW = 0;
   if (rssi >= -40) sigBarW = 79;
   else if (rssi <= -100) sigBarW = 0;
   else sigBarW = (int)((rssi + 100) * 79 / 60);
   drawDashBar("Sig:", 31, sigBarW);
-
   int heapBarW = 0;
   if (memTotal > 0) {
     heapBarW = (int)((memFree * 79UL) / memTotal);
@@ -627,19 +489,16 @@ void drawDashboard() {
     if (heapBarW > 79) heapBarW = 79;
   }
   drawDashBar("Heap:", 39, heapBarW);
-
   const int srvInnerW = 101;
   int srvBarW = (lastServoDeg * srvInnerW) / 90;
   if (srvBarW < 0) srvBarW = 0;
   if (srvBarW > srvInnerW) srvBarW = srvInnerW;
   drawDashBar("Srv:", 47, srvBarW);
-
   const int gapPx = 4;
   const int statusW = u8g2.getStrWidth("Idle");
   const int botReserveW = u8g2.getStrWidth("Bot:999");
   int nameMaxPx = 128 - gapPx - statusW - gapPx - botReserveW;
   if (nameMaxPx < 16) nameMaxPx = 16;
-
   const char* nameSrc[MAX_TRACKED_USERS];
   int longestNamePx = 0;
   for (uint8_t i = 0; i < MAX_TRACKED_USERS; i++) {
@@ -655,7 +514,6 @@ void drawDashboard() {
   }
   if (longestNamePx > nameMaxPx) longestNamePx = nameMaxPx;
   int statusX = longestNamePx + gapPx;
-
   for (uint8_t row = 0; row < MAX_TRACKED_USERS; row++) {
     uint8_t y = 55 + (row * 8);
     char name[40];
@@ -665,10 +523,8 @@ void drawDashboard() {
       name[strlen(name) - 1] = '\0';
     }
     u8g2.drawStr(0, y, name);
-
     u8g2.drawStr(statusX, y,
                  statusToWord(trackedUsers[row].active ? trackedUsers[row].status : 0));
-
     uint32_t uses = trackedUsers[row].active ? trackedUsers[row].useCount24h : 0;
     char botBuf[12];
     snprintf(botBuf, sizeof(botBuf), "Bot:%lu", (unsigned long)uses);
@@ -676,7 +532,6 @@ void drawDashboard() {
     if (botX < statusX + statusW + 2) botX = statusX + statusW + 2;
     u8g2.drawStr(botX, y, botBuf);
   }
-
   String row15 = "";
   String row16 = "";
   if (millis() < transientUntilMs) {
@@ -689,10 +544,8 @@ void drawDashboard() {
   }
   u8g2.drawStr(0, 119, row15.c_str());
   u8g2.drawStr(0, 127, row16.c_str());
-
   u8g2.sendBuffer();
 }
-
 void updateDisplay() {
   updateDisplaySleep();
   if (displayAsleep) return;
@@ -711,8 +564,6 @@ void updateDisplay() {
     drawDashboard();
   }
 }
-
-// ====== SERVO (LEDC 50Hz PWM, owner !servo 0-90) ======
 void setupServo() {
   ledc_timer_config_t timer = {
     .speed_mode       = LEDC_LOW_SPEED_MODE,
@@ -756,7 +607,6 @@ void setupPins() {
   setupServo();
   setServoAngle(45);
 }
-
 bool readTemperature(float &tempC, float &tempF) {
   pinMode(PIN_DS18B20, INPUT_PULLUP);
   sensors.requestTemperatures();
@@ -768,8 +618,6 @@ bool readTemperature(float &tempC, float &tempF) {
   tempF = c * 9.0f / 5.0f + 32.0f;
   return true;
 }
-// ====== DISCORD REST ======
-
 void boardMemTotals(uint32_t& memFree, uint32_t& memTotal) {
   uint32_t psramSize = ESP.getPsramSize();
   uint32_t psramFree = ESP.getFreePsram();
@@ -778,7 +626,6 @@ void boardMemTotals(uint32_t& memFree, uint32_t& memTotal) {
   memTotal = ESP.getHeapSize() + psramSize;
   memFree = ESP.getFreeHeap() + psramFree;
 }
-
 void uptimeDhms(unsigned long& days, unsigned long& hours, unsigned long& minutes) {
   unsigned long sec = millis() / 1000;
   days = sec / 86400;
@@ -786,7 +633,6 @@ void uptimeDhms(unsigned long& days, unsigned long& hours, unsigned long& minute
   minutes = (sec % 3600) / 60;
   if (days > 9999) days = 9999;
 }
-
 String getSystemInfo() {
   long rssi = WiFi.RSSI();
   uint32_t freeHeap = 0, totalHeap = 0;
@@ -803,8 +649,7 @@ String getSystemInfo() {
          "• **USB VBUS:** " + String((float)readUsbVbusMilliVolts() / 1000.0f, 3) + " V\n"
          "• **Firmware:** https://github.com/dogma2u/A-discord-bot-on-ESP32";
 }
-bool httpsInUse = false; // blocks re-entrant REST while DeepSeek holds httpsClient
-bool sendDiscordMessage(const String& channelId, const String& content, bool suppressEmbeds = false) {
+bool httpsInUse = false; bool sendDiscordMessage(const String& channelId, const String& content, bool suppressEmbeds = false) {
   if (httpsInUse) return false;
   String post = content;
   if (post.length() > DISCORD_CONTENT_MAX) post = post.substring(0, DISCORD_CONTENT_MAX - 3) + "...";
@@ -817,13 +662,11 @@ bool sendDiscordMessage(const String& channelId, const String& content, bool sup
   StaticJsonDocument<4096> doc;
   doc["content"] = post;
   doc["tts"] = false;
-  if (suppressEmbeds) doc["flags"] = 4; // SUPPRESS_EMBEDS: link stays a URL, no GitHub card
-  if (post.length() > 0 && doc["content"].isNull()) {
+  if (suppressEmbeds) doc["flags"] = 4;   if (post.length() > 0 && doc["content"].isNull()) {
     httpsClient.stop();
     httpsInUse = false;
     return false;
   }
-
   String body;
   serializeJson(doc, body);
   String request =
@@ -861,7 +704,6 @@ void sendBotPresence(const char* status, bool afk) {
   d["afk"] = afk;
   gwSendJson(doc);
 }
-
 void noteBotActivity() {
   lastBotActivityMillis = millis();
   if (!gatewayConnected || !identified) return;
@@ -869,7 +711,6 @@ void noteBotActivity() {
   botDiscordStatus = 2;
   sendBotPresence("online", false);
 }
-
 void updateBotPresenceIdle() {
   if (!gatewayConnected || !identified) return;
   if (lastBotActivityMillis == 0) {
@@ -881,15 +722,12 @@ void updateBotPresenceIdle() {
   botDiscordStatus = 1;
   sendBotPresence("idle", true);
 }
-
-// 80 MHz only when OLED off and Discord Idle. Wi-Fi needs >= 80 MHz.
 void applyCpuForIdleState() {
   bool slow = displayAsleep && botDiscordStatus == 1 && identified;
   uint32_t want = slow ? CPU_MHZ_OLED_OFF_BOT_IDLE : CPU_MHZ_ACTIVE;
   if (getCpuFrequencyMhz() == want) return;
   setCpuFrequencyMhz(want);
 }
-
 void sendIdentify() {
   StaticJsonDocument<1024> doc;
   doc["op"] = 2;
@@ -901,8 +739,7 @@ void sendIdentify() {
   props["device"]  = "esp32";
   d["compress"]         = false;
   d["large_threshold"] = 250;
-  d["intents"] = 37635; // GUILDS + MEMBERS + PRESENCES + MESSAGES + DMs + MESSAGE_CONTENT
-  JsonObject presence = d.createNestedObject("presence");
+  d["intents"] = 37635;   JsonObject presence = d.createNestedObject("presence");
   presence["since"] = nullptr;
   presence.createNestedArray("activities");
   presence["status"] = "online";
@@ -911,7 +748,6 @@ void sendIdentify() {
   lastBotActivityMillis = millis();
   botDiscordStatus = 2;
 }
-
 void sendHeartbeat() {
   StaticJsonDocument<256> doc;
   doc["op"] = 1;
@@ -941,12 +777,10 @@ bool isLedByteToken(const String& s) {
   int v = s.toInt();
   return v >= 0 && v <= 255;
 }
-
 void setLedRgb(uint8_t r, uint8_t g, uint8_t b) {
   pixels.setPixelColor(0, pixels.Color(r, g, b));
   pixels.show();
 }
-
 bool parseRgbTriplet(const String& args, uint8_t& r, uint8_t& g, uint8_t& b) {
   String a = args;
   a.trim();
@@ -965,11 +799,9 @@ bool parseRgbTriplet(const String& args, uint8_t& r, uint8_t& g, uint8_t& b) {
   b = (uint8_t)bs.toInt();
   return true;
 }
-
 bool isOwner(const String& authorId) {
   return authorId == OWNER_ID_STR;
 }
-// ====== PUBLIC HTTP APIs (Discord commands) ======
 bool getWeather(const String& zip, String& outReport) {
   WiFiClient client;
   String url = "/data/2.5/weather?zip=" + zip + ",US&units=imperial&appid=" + WEATHER_API_KEY;
@@ -1010,15 +842,12 @@ bool skipHttpHeaders(Client& client, unsigned long timeoutMs) {
   }
   return true;
 }
-
 bool httpsConnect(const char* host, uint32_t timeoutMs) {
   httpsClient.stop();
   httpsClient.setInsecure();
   httpsClient.setTimeout(timeoutMs);
   return httpsClient.connect(host, 443);
 }
-
-// Returns 0=ok, 1=connect failed, 2=header timeout.
 uint8_t httpsGetOpen(const char* host, const String& path, unsigned long headerTimeoutMs,
                      const char* userAgent, const char* extraHeaders) {
   if (!httpsConnect(host)) return 1;
@@ -1034,7 +863,6 @@ uint8_t httpsGetOpen(const char* host, const String& path, unsigned long headerT
   }
   return 0;
 }
-
 uint8_t httpGetOpen(WiFiClient& client, const char* host, const String& path, unsigned long headerTimeoutMs) {
   if (!client.connect(host, 80)) return 1;
   client.print(String("GET ") + path + " HTTP/1.1\r\n"
@@ -1046,12 +874,10 @@ uint8_t httpGetOpen(WiFiClient& client, const char* host, const String& path, un
   }
   return 0;
 }
-
 void setHttpOpenError(String& outReport, uint8_t err, const char* label) {
   outReport = String(label);
   outReport += (err == 2) ? " timeout." : " connection failed.";
 }
-
 bool httpsAwaitHeaders(unsigned long deadlineMs, bool pump, String& outStatus,
                        bool& chunked, int& contentLength) {
   while (httpsClient.available() == 0) {
@@ -1080,7 +906,6 @@ bool httpsAwaitHeaders(unsigned long deadlineMs, bool pump, String& outStatus,
   }
   return true;
 }
-
 bool discordIdLooksValid(const String& id) {
   if (id.length() < 16) return false;
   for (unsigned int i = 0; i < id.length(); i++) {
@@ -1089,7 +914,6 @@ bool discordIdLooksValid(const String& id) {
   }
   return true;
 }
-
 bool discordRestGet(const String& path, String& outBody, String& outStatus) {
   outBody = "";
   if (!httpsConnect("discord.com", 15000)) {
@@ -1105,7 +929,6 @@ bool discordRestGet(const String& path, String& outBody, String& outStatus) {
     "User-Agent: MiniMeBot/1.0\r\n"
     "Connection: close\r\n\r\n";
   httpsClient.print(request);
-
   unsigned long deadline = millis() + 15000UL;
   bool chunked = false;
   int contentLength = -1;
@@ -1117,10 +940,8 @@ bool discordRestGet(const String& path, String& outBody, String& outStatus) {
   httpsClient.stop();
   return ok;
 }
-
 String guildIdFromChannel(const String& channelId) {
   if (!discordIdLooksValid(channelId)) return "";
-
   String body, status;
   if (!discordRestGet("/api/v10/channels/" + channelId, body, status)) {
     return "";
@@ -1130,7 +951,6 @@ String guildIdFromChannel(const String& channelId) {
     return "";
   }
   if (jsonStart > 0) body = body.substring(jsonStart);
-
   StaticJsonDocument<64> filter;
   filter["guild_id"] = true;
   StaticJsonDocument<512> doc;
@@ -1141,7 +961,6 @@ String guildIdFromChannel(const String& channelId) {
   String gid = doc["guild_id"] | "";
   return gid;
 }
-
 void rememberGuildId(const String& gid) {
   String id = gid;
   id.trim();
@@ -1152,41 +971,34 @@ void rememberGuildId(const String& gid) {
   if (cachedGuildCount >= 3) return;
   cachedGuildIds[cachedGuildCount++] = id;
 }
-
 bool appendMembersFromGuild(const String& guildId, uint8_t maxToAdd) {
   if (!discordIdLooksValid(guildId)) return false;
-
   String body, status;
   String path = "/api/v10/guilds/" + guildId + "/members?limit=200";
   if (!discordRestGet(path, body, status)) {
     return false;
   }
-
   int jsonStart = body.indexOf('[');
   int objStart = body.indexOf('{');
   if (jsonStart < 0 || (objStart >= 0 && objStart < jsonStart)) {
     return false;
   }
   if (jsonStart > 0) body = body.substring(jsonStart);
-
   StaticJsonDocument<256> filter;
   filter[0]["nick"] = true;
   filter[0]["user"]["id"] = true;
   filter[0]["user"]["username"] = true;
   filter[0]["user"]["global_name"] = true;
   filter[0]["user"]["bot"] = true;
-
   DynamicJsonDocument doc(8192);
   DeserializationError err = deserializeJson(doc, body, DeserializationOption::Filter(filter));
   if (err) {
     return false;
   }
-
   JsonArray members = doc.as<JsonArray>();
   if (members.isNull()) {
     return false;
   }
-
   uint8_t added = 0;
   for (JsonObject member : members) {
     if (added >= maxToAdd) break;
@@ -1201,21 +1013,17 @@ bool appendMembersFromGuild(const String& guildId, uint8_t maxToAdd) {
     fillTrackedSlot((uint8_t)slot, uid, name);
     added++;
   }
-
   return added > 0;
 }
-
 bool fetchGuildMembersAtStartup() {
   initTrackedUsers();
   cachedGuildCount = 0;
   rememberGuildId(String(BOT_GUILD_ID));
   rememberGuildId(guildIdFromChannel(TARGET_CHANNEL_ID));
   rememberGuildId(guildIdFromChannel(TARGET_CHANNEL_ID1));
-
   if (cachedGuildCount == 0) {
     return false;
   }
-
   bool any = false;
   uint8_t share = (cachedGuildCount > 0) ? (MAX_TRACKED_USERS / cachedGuildCount) : MAX_TRACKED_USERS;
   if (share < 1) share = 1;
@@ -1227,8 +1035,6 @@ bool fetchGuildMembersAtStartup() {
   }
   return any;
 }
-
-// ====== SCIENCE / AI HTTP HELPERS ======
 String collapseWhitespace(String s) {
   s.replace("\n", " ");
   s.replace("\r", " ");
@@ -1243,7 +1049,6 @@ String truncateText(const String& s, int maxLen) {
   if (s.length() <= maxLen) return s;
   return s.substring(0, maxLen - 3) + "...";
 }
-
 bool getScienceNews(String& outReport) {
   uint8_t openErr = httpsGetOpen("api.spaceflightnewsapi.net", "/v4/articles/?limit=3", 8000);
   if (openErr) {
@@ -1390,7 +1195,6 @@ bool getIssPosition(String& outReport) {
 bool askNeedPost = false;
 String askPendingQuestion;
 String askPendingChannelId;
-
 bool readHttpBodyAfterHeaders(Client& client, bool chunked, int contentLength,
                               String& outBody, unsigned long deadlineMs) {
   outBody = "";
@@ -1569,8 +1373,7 @@ void runAskFromLoop() {
   askNeedPost = false;
   String channelId = askPendingChannelId;
   String report;
-  httpsInUse = true; // keep Gateway from starting other HTTPS during DeepSeek
-  bool ok = askDeepSeek(askPendingQuestion, report);
+  httpsInUse = true;   bool ok = askDeepSeek(askPendingQuestion, report);
   httpsInUse = false;
   askPendingQuestion = "";
   askPendingChannelId = "";
@@ -1589,24 +1392,19 @@ void runAskFromLoop() {
     showTransient("DeepSeek", "Error");
   }
 }
-
-// ====== DISCORD COMMAND DISPATCH ======
 typedef bool (*FetchReportFn)(String&);
-
 void sendFetchResult(const String& channelId, const char* label, bool ok, const String& report,
                      const String& okLine2 = "Sent", const String& okLine3 = "") {
   sendDiscordMessage(channelId, report);
   if (ok) showTransient(label, okLine2, okLine3);
   else showTransient(label, "Error");
 }
-
 void runFetchCommand(const String& channelId, const char* label, const char* fetching,
                      FetchReportFn fetch) {
   String report;
   showTransient(label, fetching);
   sendFetchResult(channelId, label, fetch(report), report);
 }
-
 void handleCommand(const String& content, const String& authorId, const String& authorName,
                    const String& channelId, bool isDM)
 {
@@ -1633,15 +1431,13 @@ void handleCommand(const String& content, const String& authorId, const String& 
     raw = raw.substring(bang);
     midLine = true;
   }
-
   noteBotActivity();
   int spIdx = raw.indexOf(' ');
   String cmdWord = (spIdx > 0) ? raw.substring(0, spIdx) : raw;
   String args = (spIdx > 0) ? raw.substring(spIdx + 1) : "";
   cmdWord.toLowerCase();
   args.trim();
-  // Mid-line bang: one-word args for most cmds. !ask / !display / !led keep multi-word args.
-  if (midLine && args.length() > 0 &&
+    if (midLine && args.length() > 0 &&
       cmdWord != "!ask" && cmdWord != "!display" && cmdWord != "!led") {
     int argSp = args.indexOf(' ');
     if (argSp > 0) args = args.substring(0, argSp);
@@ -1654,9 +1450,7 @@ void handleCommand(const String& content, const String& authorId, const String& 
       }
     }
   }
-
   recordUserUse(authorId, authorName);
-
   if (cmdWord == "!help") {
     String helpMsg =
       "🤖 **MiniMe Bot Commands**\n\n"
@@ -1847,11 +1641,9 @@ void handleCommand(const String& content, const String& authorId, const String& 
       return;
     }
   }
-
   sendDiscordMessage(channelId, "That is not a command.");
   showTransient("Unknown", cmdWord);
 }
-// ====== DISCORD GATEWAY WEBSOCKET ======
 void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED:
@@ -1889,7 +1681,6 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
         gwFilter["d"]["guilds"][0]["presences"][0]["status"] = true;
         gwFilterInit = true;
       }
-
       if (!gwDoc) return;
       gwDoc->clear();
       DeserializationError err = deserializeJson(*gwDoc, payload, length, DeserializationOption::Filter(gwFilter));
@@ -1933,8 +1724,7 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
           return;
         }
         if (strcmp(t, "MESSAGE_CREATE") == 0) {
-          if (httpsInUse) return; // DeepSeek holds HTTPS; defer commands until free
-          JsonObject d = (*gwDoc)["d"];
+          if (httpsInUse) return;           JsonObject d = (*gwDoc)["d"];
           if (d["author"]["bot"] == true) return;
           String content   = d["content"].as<String>();
           String channelId = d["channel_id"].as<String>();
@@ -1950,12 +1740,10 @@ void gatewayEvent(WStype_t type, uint8_t * payload, size_t length) {
       break;
   }
 }
-// ====== SCHEDULED POSTS (loop) ======
 void backgroundTasks() {
   runAskFromLoop();
   unsigned long now = millis();
-  // Wait for Gateway so boot sysinfo is not "Disconnected"
-  if (gatewayConnected && identified &&
+    if (gatewayConnected && identified &&
       (lastSysInfoMillis == 0 || now - lastSysInfoMillis >= SYSINFO_INTERVAL_MS)) {
     lastSysInfoMillis = now;
     noteBotActivity();
@@ -1984,7 +1772,6 @@ void backgroundTasks() {
     }
   }
 }
-// ====== SETUP / LOOP ======
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -1994,13 +1781,11 @@ void connectWiFi() {
   }
   showTransient("WiFi", "Connected");
 }
-
 void connectGateway() {
   gatewayWS.beginSSL("gateway.discord.gg", 443, "/?v=10&encoding=json");
   gatewayWS.onEvent(gatewayEvent);
   gatewayWS.setReconnectInterval(5000);
 }
-
 void setup() {
   delay(500);
   gwDoc = new DynamicJsonDocument(GW_DOC_PSRAM);
@@ -2025,11 +1810,9 @@ void setup() {
   connectGateway();
   setServoAngle(45);
   lastDashMillis = 0;
-  setupTouch(); // after WiFi/I2C
-  showTransient("Ready", "Idle presence");
+  setupTouch();   showTransient("Ready", "Idle presence");
   drawDashboard();
 }
-
 void loop() {
   pumpGateway();
   backgroundTasks();
